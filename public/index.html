@@ -1986,23 +1986,7 @@ body.auth-popup-open #auth.auth.auth-modal{display:grid!important;visibility:vis
           <button class="auth-primary-button" type="button" onclick="clientAccountLogin()"><span>CONSULTER MON COMPTE</span></button>
           <button class="auth-secondary-button" style="margin-top:12px;width:100%" type="button" onclick="switchTab('login')"><span>Retour connexion administration</span></button>
         </div>
-        <div id="registerBox" class="auth-panel hidden">
-          <div class="auth-register-note">Initialisez une seule fois l’espace administrateur de ASSOCIATION OUKAMI DE DIABO.</div>
-          <div class="auth-register-grid">
-            <div class="field"><label>Association</label><input id="bankName" value="ASSOCIATION OUKAMI DE DIABO" readonly></div>
-            <div class="field"><label for="bankManager">Responsable</label><input id="bankManager" placeholder="Nom du responsable"></div>
-            <div class="field"><label for="bankLogin">Identifiant administrateur</label><input id="bankLogin" placeholder="Ex : MFINAC123" autocomplete="username"></div>
-            <div class="field"><label for="bankPass">Mot de passe</label><div class="passwordEyeWrap"><input id="bankPass" type="password" placeholder="Mot de passe administrateur" autocomplete="new-password"><button type="button" data-eye-icon onclick="togglePasswordField('bankPass',this)" aria-label="Afficher le mot de passe"><svg class="eye-open" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12s3.4-6 9.5-6 9.5 6 9.5 6-3.4 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.7"></circle></svg><svg class="eye-off" viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 3 18 18M10.6 6.1A9.7 9.7 0 0 1 12 6c6.1 0 9.5 6 9.5 6a16 16 0 0 1-3 3.8M6.1 6.1C3.8 7.7 2.5 12 2.5 12s3.4 6 9.5 6a9 9 0 0 0 3-.5M9.9 9.9a3 3 0 0 0 4.2 4.2"></path></svg></button></div></div>
-            <div class="field"><label for="bankContact">Contact</label><input id="bankContact" placeholder="Téléphone"></div>
-            <div class="field"><label for="bankEmail">E-mail</label><input id="bankEmail" type="email" placeholder="email@exemple.com"></div>
-            <div class="field"><label for="bankCity">Ville</label><input id="bankCity" placeholder="Ville"></div>
-            <div class="field"><label for="bankCountry">Pays</label><input id="bankCountry" placeholder="Pays"></div>
-          </div>
-          <div class="auth-register-actions">
-            <button type="button" class="btn auth-back-button" onclick="switchTab('login',this)">Retour</button>
-            <button id="registerBankBtn" class="btn auth-primary-button" type="button" onclick="registerBank()">Créer la banque</button>
-          </div>
-        </div>
+        <!-- V15 : création Administrateur réservée exclusivement au Super Admin. -->
 
         <p class="auth-legal">En utilisant <button type="button" class="goldLink" onclick="openLegalModal('app')">ASSOCIATION OUKAMI DE DIABO</button>, vous acceptez nos <button type="button" class="goldLink" onclick="openLegalModal('terms')">Conditions d’Utilisation</button> et notre <button type="button" class="goldLink" onclick="openLegalModal('privacy')">Politique de Confidentialité</button>.</p>
       </div>
@@ -2296,33 +2280,7 @@ async function checkStatus(){
   else console.warn('API non connectée:',e&&e.message?e.message:e);
  }
 }
-async function registerBank(){
-  const btn=$('registerBankBtn');
-  try{
-    const payload={
-      name:($('bankName')&&$('bankName').value.trim())||'',
-      manager:($('bankManager')&&$('bankManager').value.trim())||'',
-      login:($('bankLogin')&&$('bankLogin').value.trim())||'',
-      pass:($('bankPass')&&$('bankPass').value)||'',
-      contact:($('bankContact')&&$('bankContact').value.trim())||'',
-      email:($('bankEmail')&&$('bankEmail').value.trim())||'',
-      city:($('bankCity')&&$('bankCity').value.trim())||'',
-      country:($('bankCountry')&&$('bankCountry').value.trim())||'',
-      address:[($('bankCity')&&$('bankCity').value.trim())||'',($('bankCountry')&&$('bankCountry').value.trim())||''].filter(Boolean).join(' - ')
-    };
-    if(!payload.name)return toast('Nom de la banque obligatoire');
-    if(!payload.manager)return toast('Responsable obligatoire');
-    if(!payload.login)return toast('Identifiant administrateur obligatoire');
-    if(!payload.pass)return toast('Mot de passe obligatoire');
-    if(btn){btn.disabled=true;btn.dataset.oldText=btn.textContent;btn.textContent='Création en cours...';}
-    await api('/register',payload);
-    if($('loginId'))$('loginId').value=payload.login;
-    if($('loginPass'))$('loginPass').value='';
-    toast('Banque créée avec succès. Connectez-vous avec l’identifiant administrateur.');
-    switchTab('login',document.querySelector('.tab'));
-  }catch(e){toast((e&&e.message)||'Inscription impossible')}
-  finally{if(btn){btn.disabled=false;if(btn.dataset.oldText)btn.textContent=btn.dataset.oldText;}}
-}
+async function registerBank(){toast('Création réservée au Super Admin.');return false;}
 async function login(ev){
   if(ev&&ev.preventDefault)ev.preventDefault();
   if(ev&&ev.stopPropagation)ev.stopPropagation();
@@ -6325,7 +6283,7 @@ function showAuth(){const l=$('landing'),a=$('auth'),app=$('app');if(l)l.style.d
 function closeAuthPopup(){const a=$('auth'),l=$('landing'),app=$('app');if(a){a.style.setProperty('display','none','important');a.setAttribute('aria-hidden','true');}restorePageScroll();if(!app||app.style.display!=='block'){if(l)l.style.display='block';renderLandingConnectedMenu();}return false;}
 function handleAuthBackdrop(e){if(e&&e.target===$('auth'))closeAuthPopup();}
 function openAuthLogin(){showAuth();switchTab('login');clearLoginError();clearAuthInfo();setTimeout(()=>{const el=$('loginId');if(el)el.focus();},80);return false;}
-function openAuthRegister(){showAuth();switchTab('register');clearLoginError();clearAuthInfo();setTimeout(()=>{const el=$('bankName');if(el)el.focus();},80);return false;}
+function openAuthRegister(){showAuth();switchTab('login');clearLoginError();toast('La création du compte Administrateur est réservée au Super Admin.');return false;}
 
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('auth')&&$('auth').style.display==='grid')closeAuthPopup();});
 function enhanceFastUi(){if(window.__fastUiBound)return;window.__fastUiBound=true;document.documentElement.classList.add('fast-ui-ready');document.addEventListener('pointerdown',e=>{const el=e.target.closest&&e.target.closest('button,a,.btn,.mini');if(el)el.classList.add('is-pressing')},{passive:true});document.addEventListener('pointerup',e=>{const el=e.target.closest&&e.target.closest('button,a,.btn,.mini');if(el)el.classList.remove('is-pressing')},{passive:true});document.addEventListener('pointercancel',()=>document.querySelectorAll('.is-pressing').forEach(el=>el.classList.remove('is-pressing')),{passive:true});}

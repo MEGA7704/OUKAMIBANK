@@ -766,16 +766,8 @@ async function handleApi(request,env,path){
   await ensureSchema(env);
   if(path==='/api/status')return json({ok:true,cloudflare:true,d1:true,kv:true,message:'API connectée. D1 + KV actifs.'});
   if(path==='/api/register'&&request.method==='POST'){
-   const b=await body(request);const login=String(b.login||'').trim(),password=String(b.pass||'');
-   const existingAssociation=await env.DB.prepare('SELECT id FROM banks LIMIT 1').first();
-   if(existingAssociation)return json({error:'ASSOCIATION OUKAMI DE DIABO est déjà initialisée. Aucune autre structure ne peut être créée.'},409);
-   b.name='ASSOCIATION OUKAMI DE DIABO'; b.city='Diabo'; b.country="Côte d’Ivoire";
-   if(!login||!password)return json({error:'Identifiant administrateur et mot de passe obligatoires.'},400);
-   const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);
-   if(loginReserved(env,login)||await loginExists(env,login))return json({error:'Identifiant déjà utilisé.'},409);
-   const id=uid('BANK'),passHash=await hashPassword(password);
-   await env.DB.prepare("INSERT INTO banks(id,name,manager,contact,address,email,city,country,login,pass,auth_version,status,subscription,subscription_started_at,subscription_expires_at,subscription_updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,datetime('now'),'',datetime('now'))").bind(id,b.name,b.manager||'',b.contact||'',b.address||'',b.email||'',b.city||'',b.country||'',login,passHash,'Actif','PENDING').run();
-   await ensureCompanyAccount(env,id);await addLog(env,id,'Association créée — formule Illimité en attente d’activation par le Super Admin');return json({ok:true,id,subscription:'PENDING'});
+   // V15: création du compte Administrateur strictement réservée au Super Admin.
+   return json({error:'Création publique désactivée. Seul le Super Admin peut créer le compte Administrateur depuis son espace sécurisé.'},403);
   }
   if(path==='/api/client-view'&&request.method==='POST'){
    const b=await body(request);const accountNumber=String(b.account_number||'').trim();
