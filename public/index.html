@@ -1772,6 +1772,20 @@ button,a,.btn,.mini,.menu button{touch-action:manipulation;-webkit-tap-highlight
   .bankOverviewDocs .bankOverviewDocBlock{grid-column:span 2!important;}
 }
 /* === FIN V40 PROFIL BANQUE 4 COLONNES === */
+
+/* V9 — HERO IMAGE FOURNIE, FONDUE DANS LE DECOR. Aucun autre fonctionnement modifie. */
+#landing .v29-hero.v9-hero-reference{
+  position:relative!important; min-height:clamp(520px,66vw,820px)!important; padding:0!important;
+  background-image:url('/assets/oukami-hero-reference.png')!important; background-size:cover!important;
+  background-position:center center!important; background-repeat:no-repeat!important; border-bottom:0!important; overflow:hidden!important;
+}
+#landing .v29-hero.v9-hero-reference:after{display:none!important}
+#landing .v29-hero.v9-hero-reference:before{content:'';position:absolute;inset:0;pointer-events:none;z-index:1;
+  background:linear-gradient(90deg,rgba(2,40,26,.32) 0%,rgba(2,40,26,.05) 18%,transparent 36%,transparent 74%,rgba(2,40,26,.08) 90%,rgba(2,40,26,.24) 100%),
+  linear-gradient(0deg,rgba(2,40,26,.38) 0%,transparent 13%,transparent 86%,rgba(2,40,26,.18) 100%);}
+#landing .v9-hero-fade{position:absolute;inset:0;z-index:2;pointer-events:none;box-shadow:inset 0 0 70px rgba(2,40,26,.30)}
+@media(max-width:900px){#landing .v29-hero.v9-hero-reference{min-height:clamp(390px,66vw,610px)!important;background-position:center center!important}}
+@media(max-width:600px){#landing .v29-hero.v9-hero-reference{min-height:390px!important;background-size:cover!important;background-position:center center!important}}
 </style>
 
 
@@ -1868,7 +1882,7 @@ body.auth-popup-open #auth.auth.auth-modal{display:grid!important;visibility:vis
 <header class="v29-nav"><div class="v29-wrap v29-nav-inner"><a class="v29-brand" href="javascript:void(0)" onclick="showLanding();return false;"><span class="v29-logo">🤝</span><span><small>ASSOCIATION</small><b>OUKAMI DE DIABO</b><em>ÉPARGNE • SOLIDARITÉ • DÉVELOPPEMENT</em></span></a><nav class="oukami-main-nav"><button type="button" class="active" onclick="showLanding();return false;">⌂ Accueil</button><button type="button" onclick="openClientAccess();return false;">👤 Espace client</button><button type="button" onclick="openAuthLogin();return false;">▣ Administration</button></nav></div></header>
 
 <main>
-<section id="about" class="v29-hero"><div class="v29-wrap v29-hero-grid"><div class="v29-copy"><span class="v29-pill">ÉPARGNE • SOLIDARITÉ • DÉVELOPPEMENT</span><h1>Votre association<br><strong>financière,</strong><br>plus proche de vous</h1><p>Un espace moderne pour suivre l’épargne, les comptes, les crédits et les opérations des membres de l’ASSOCIATION OUKAMI DE DIABO, avec une consultation simple, rapide et sécurisée.</p></div><div class="v29-device v8-hero-photo" role="img" aria-label="Espace de travail OUKAMI avec ordinateur portable"></div></div></section>
+<section id="about" class="v29-hero v9-hero-reference" role="img" aria-label="ASSOCIATION OUKAMI DE DIABO — épargne, solidarité et développement"><div class="v9-hero-fade" aria-hidden="true"></div></section>
 <section id="services" class="v29-services"><div class="v29-wrap"><div class="v29-title"><span>NOS SERVICES</span><h2>Des services <strong>complets</strong> pour une meilleure gestion</h2><p>Une gestion claire des membres, comptes, opérations, crédits et états financiers de l’association.</p></div><div class="v29-grid"><article><i>👥</i><div><h3>Ouverture et gestion de comptes</h3><p>Ouvrez, organisez et gérez vos comptes avec une interface claire, structurée et sécurisée.</p></div></article><article><i>🏛</i><div><h3>Opérations bancaires</h3><p>Enregistrez et suivez vos dépôts, retraits, virements, paiements et mouvements financiers.</p></div></article><article><i>🤲</i><div><h3>Crédits et financements</h3><p>Pilotez les crédits, échéances, remboursements, intérêts et encours avec précision.</p></div></article><article><i>▦</i><div><h3>Gestion des frais bancaires</h3><p>Centralisez frais, commissions, pénalités et coûts liés aux opérations et aux comptes.</p></div></article><article><i>👤</i><div><h3>Gestion de la clientèle</h3><p>Accédez rapidement aux dossiers clients, aux comptes liés et à l’historique des opérations.</p></div></article><article><i>▥</i><div><h3>Suivi et rapports financiers</h3><p>Analysez les performances avec des rapports détaillés, indicateurs et états de gestion.</p></div></article><article><i>⌂</i><div><h3>Gestion professionnelle de l’établissement</h3><p>Administrez l’activité, les utilisateurs, les obligations et la trésorerie depuis un seul espace.</p></div></article><article><i>🎧</i><div><h3>Assistance et communication</h3><p>Restez accompagné grâce aux outils de support, de communication et de suivi interne.</p></div></article></div>
 <div class="v29-features"><span>🛡️ <b>Sécurité renforcée</b><small>Protection de vos données</small></span><span>⚡ <b>Gestion simple</b><small>Une prise en main rapide</small></span><span>▥ <b>Transactions rapides</b><small>Traitement en temps réel</small></span><span>🎧 <b>Support client</b><small>Assistance dédiée</small></span><span>⚙ <b>Solution flexible</b><small>Adaptée à vos besoins</small></span><span>▯ <b>Accessible 24h/24</b><small>Sur tous vos appareils</small></span></div>
 <div class="v29-stats"><span><b>+ 500</b><small>Membres actifs</small></span><span><b>2.450.000 FCFA</b><small>Épargne cumulée</small></span><span><b>+ 1 000</b><small>Opérations traitées</small></span><span><b>100%</b><small>Satisfaction client</small></span></div></div></section>
@@ -1948,7 +1962,6 @@ body.auth-popup-open #auth.auth.auth-modal{display:grid!important;visibility:vis
           <button id="loginBtn" class="auth-primary-button" type="button" onclick="return login(event)"><span>SE CONNECTER</span><svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M14 7l5 5-5 5"></path></svg></button>
           <div class="auth-secondary-actions">
             <button type="button" class="auth-secondary-button" onclick="openWhatsappContact()"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13v-1a8 8 0 0 1 16 0v1"></path><path d="M4 13h3v6H5a2 2 0 0 1-2-2v-2a2 2 0 0 1 1-2ZM20 13h-3v6h2a2 2 0 0 0 2-2v-2a2 2 0 0 0-1-2ZM17 19c0 1.1-1.8 2-4 2"></path></svg><span>Support</span></button>
-            <button type="button" class="auth-secondary-button" onclick="openClientAccess()"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c.7-5 3.4-7 8-7s7.3 2 8 7"></path></svg><span>Espace client</span></button>
           </div>
           <div id="forgotInfo" class="auth-info hidden"></div>
         </div>
@@ -2196,6 +2209,7 @@ function printReportSection(id){
   if(target&&target.classList&&target.classList.contains('tab'))target.classList.add('active');
   if($('loginBox'))$('loginBox').classList.toggle('hidden',id!=='login');
   if($('registerBox'))$('registerBox').classList.toggle('hidden',id!=='register');
+  if($('clientAccessBox'))$('clientAccessBox').classList.add('hidden');
   if($('authPanelTitle'))$('authPanelTitle').textContent=id==='register'?'Ouvrir un compte':'Connexion';
   if($('authPanelSubtitle'))$('authPanelSubtitle').textContent=id==='register'?'Créez votre espace bancaire professionnel.':'Veuillez vous connecter à votre espace bancaire.';
   clearLoginError();clearAuthInfo();
