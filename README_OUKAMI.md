@@ -1,6 +1,6 @@
 # ASSOCIATION OUKAMI DE DIABO — adaptation
 
-Projet mono-association dérivé de GLOBAL BANK.
+Projet mono-association dérivé de ASSOCIATION OUKAMI DE DIABO.
 
 ## Cloudflare bindings
 - KV binding `KV` → namespace `OUKAMI_KV`, ID `25eac34d165240bfbd8c1bcd14c2954d`

@@ -720,7 +720,7 @@ async function requireActiveBankSubscription(env,bankId){
  if(sub.expired)throw json({error:'Formule Illimité non activée. Contactez le Super Admin.'},403);
  return sub;
 }
-function bankListSelect(){return "SELECT id,name,manager,contact,address,login,status,subscription,subscription_started_at,subscription_expires_at,subscription_updated_at,created_at, NULL AS days_remaining, CASE WHEN status='Suspendu' THEN 'Suspendu' WHEN upper(COALESCE(subscription,''))='ULTIMATE' THEN 'Actif' ELSE 'En attente d’activation' END AS subscription_state FROM banks ORDER BY created_at DESC";}
+function bankListSelect(){return "SELECT id,name,manager,contact,address,email,login,status,subscription,subscription_started_at,subscription_expires_at,subscription_updated_at,created_at, NULL AS days_remaining, CASE WHEN status='Suspendu' THEN 'Suspendu' WHEN upper(COALESCE(subscription,''))='ULTIMATE' THEN 'Actif' ELSE 'En attente d’activation' END AS subscription_state FROM banks ORDER BY created_at DESC";}
 
 async function bankPayload(env,bankId,session={}){
  const bank=await env.DB.prepare('SELECT id,name,manager,contact,address,email,slogan,logo,stamp,signature,primary_color,secondary_color,footer_text,legal_mentions,cga_conditions,currency,country,city,login,status,subscription,subscription_started_at,subscription_expires_at,subscription_updated_at,created_at FROM banks WHERE id=?').bind(bankId).first();
@@ -886,8 +886,20 @@ async function handleApi(request,env,path){
    await addSecurityLog(env,row.recipient_bank_id||'',s,'Suppression message','Messagerie Super Admin','autorisé',row.subject||'');
    return json({ok:true});
   }
+  if(path==='/api/super/admin'&&request.method==='POST'&&s.role==='super'){
+   const u=await body(request);const bankId=String(u.bank_id||'').trim();const manager=String(u.manager||'').trim();const login=String(u.login||'').trim();const contact=String(u.contact||'').trim();const email=String(u.email||'').trim();const password=String(u.newpass||'');
+   if(!bankId||!manager||!login)return json({error:'Association, responsable et identifiant obligatoires.'},400);
+   const bank=await env.DB.prepare('SELECT id,login FROM banks WHERE id=?').bind(bankId).first();if(!bank)return json({error:'Association introuvable.'},404);
+   if(loginReserved(env,login))return json({error:'Cet identifiant est réservé.'},409);
+   const otherBank=await env.DB.prepare('SELECT id FROM banks WHERE login=? AND id<>? LIMIT 1').bind(login,bankId).first();
+   const otherUser=await env.DB.prepare('SELECT id FROM users WHERE login=? AND COALESCE(is_deleted,0)=0 LIMIT 1').bind(login).first();
+   if(otherBank||otherUser)return json({error:'Identifiant déjà utilisé.'},409);
+   if(password){const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);const passHash=await hashPassword(password);await env.DB.prepare('UPDATE banks SET manager=?,login=?,contact=?,email=?,pass=?,auth_version=COALESCE(auth_version,1)+1 WHERE id=?').bind(manager,login,contact,email,passHash,bankId).run();}
+   else{await env.DB.prepare('UPDATE banks SET manager=?,login=?,contact=?,email=? WHERE id=?').bind(manager,login,contact,email,bankId).run();}
+   await addLog(env,bankId,'Compte Administrateur de l’association créé ou modifié par le Super Admin');await addSecurityLog(env,bankId,s,'Gestion compte Administrateur','Super Admin','autorisé',login);return json({ok:true});
+  }
   if(path==='/api/super/user'&&request.method==='POST'&&s.role==='super'){
-   return json({error:'La création des utilisateurs est réservée à l’Administrateur banque.'},403);
+   return json({error:'Utilisez la gestion du compte Administrateur de l’association.'},403);
   }
   if(path==='/api/super/user/toggle'&&request.method==='POST'&&s.role==='super'){
    return json({error:'Le blocage/déblocage des utilisateurs de banque est réservé à l’Administrateur banque.'},403);

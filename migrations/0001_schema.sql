@@ -1,4 +1,4 @@
--- GLOBAL BANK — schéma initial D1 sécurisé
+-- ASSOCIATION OUKAMI DE DIABO — schéma initial D1 sécurisé
 -- Les colonnes `pass` de banks/users contiennent uniquement des empreintes PBKDF2-SHA256.
 
 CREATE TABLE IF NOT EXISTS banks (
