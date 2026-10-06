@@ -568,6 +568,14 @@ async function ensureSchema(env){if(schemaReady)return; await env.DB.exec(SCHEMA
   'CREATE INDEX IF NOT EXISTS idx_operation_requests_bank ON operation_requests(bank_id,created_at)',
   'CREATE INDEX IF NOT EXISTS idx_operation_requests_user ON operation_requests(bank_id,requested_by,created_at)'
  ]){try{await env.DB.exec(sql)}catch(e){}}
+ // V16 — mono-association : garantir que l’association OUKAMI existe avant toute gestion administrateur.
+ try{
+  const existing=await env.DB.prepare("SELECT id FROM banks LIMIT 1").first();
+  if(!existing){
+   await env.DB.prepare("INSERT INTO banks(id,name,manager,contact,address,email,login,pass,status,subscription) VALUES(?,?,?,?,?,?,?,?,?,?)")
+    .bind('OUKAMI-DIABO','ASSOCIATION OUKAMI DE DIABO','','0757577542 / 0545202646','Diabo','oukami011@gmail.com','__oukami_admin_pending__','__NO_LOGIN_UNTIL_SUPERADMIN_CREATES_PASSWORD__','Actif','PENDING').run();
+  }
+ }catch(e){}
  schemaReady=true;}
 
 async function managementSettings(env,bankId){
@@ -881,14 +889,21 @@ async function handleApi(request,env,path){
   if(path==='/api/super/admin'&&request.method==='POST'&&s.role==='super'){
    const u=await body(request);const bankId=String(u.bank_id||'').trim();const manager=String(u.manager||'').trim();const login=String(u.login||'').trim();const contact=String(u.contact||'').trim();const email=String(u.email||'').trim();const password=String(u.newpass||'');
    if(!bankId||!manager||!login)return json({error:'Association, responsable et identifiant obligatoires.'},400);
-   const bank=await env.DB.prepare('SELECT id,login FROM banks WHERE id=?').bind(bankId).first();if(!bank)return json({error:'Association introuvable.'},404);
+   let bank=await env.DB.prepare('SELECT id,login FROM banks WHERE id=?').bind(bankId).first();
+   if(!bank){
+    const singleton=await env.DB.prepare('SELECT id,login FROM banks ORDER BY created_at ASC LIMIT 1').first();
+    if(singleton)bank=singleton;
+   }
+   if(!bank)return json({error:'Association OUKAMI non initialisée. Rechargez l’espace Super Admin puis réessayez.'},404);
+   const effectiveBankId=String(bank.id);
+   if(String(bank.login||'')==='__oukami_admin_pending__'&&!password)return json({error:'Définissez obligatoirement un mot de passe lors de la création initiale du compte Administrateur.'},400);
    if(loginReserved(env,login))return json({error:'Cet identifiant est réservé.'},409);
-   const otherBank=await env.DB.prepare('SELECT id FROM banks WHERE login=? AND id<>? LIMIT 1').bind(login,bankId).first();
+   const otherBank=await env.DB.prepare('SELECT id FROM banks WHERE login=? AND id<>? LIMIT 1').bind(login,effectiveBankId).first();
    const otherUser=await env.DB.prepare('SELECT id FROM users WHERE login=? AND COALESCE(is_deleted,0)=0 LIMIT 1').bind(login).first();
    if(otherBank||otherUser)return json({error:'Identifiant déjà utilisé.'},409);
-   if(password){const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);const passHash=await hashPassword(password);await env.DB.prepare('UPDATE banks SET manager=?,login=?,contact=?,email=?,pass=?,auth_version=COALESCE(auth_version,1)+1 WHERE id=?').bind(manager,login,contact,email,passHash,bankId).run();}
-   else{await env.DB.prepare('UPDATE banks SET manager=?,login=?,contact=?,email=? WHERE id=?').bind(manager,login,contact,email,bankId).run();}
-   await addLog(env,bankId,'Compte Administrateur de l’association créé ou modifié par le Super Admin');await addSecurityLog(env,bankId,s,'Gestion compte Administrateur','Super Admin','autorisé',login);return json({ok:true});
+   if(password){const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);const passHash=await hashPassword(password);await env.DB.prepare('UPDATE banks SET manager=?,login=?,contact=?,email=?,pass=?,auth_version=COALESCE(auth_version,1)+1 WHERE id=?').bind(manager,login,contact,email,passHash,effectiveBankId).run();}
+   else{await env.DB.prepare('UPDATE banks SET manager=?,login=?,contact=?,email=? WHERE id=?').bind(manager,login,contact,email,effectiveBankId).run();}
+   await addLog(env,effectiveBankId,'Compte Administrateur de l’association créé ou modifié par le Super Admin');await addSecurityLog(env,effectiveBankId,s,'Gestion compte Administrateur','Super Admin','autorisé',login);return json({ok:true});
   }
   if(path==='/api/super/user'&&request.method==='POST'&&s.role==='super'){
    return json({error:'Utilisez la gestion du compte Administrateur de l’association.'},403);
