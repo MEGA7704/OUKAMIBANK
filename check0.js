@@ -531,13 +531,13 @@ function officialMoves(){
  const live=officialAccountIds();
  return rawMovesArr().filter(m=>live.has(String((m&&m.account_id)||(m&&m.accountId)||'')));
 }
-function officialGlobalBankScope(scope={}){
+function officialOukamiBankScope(scope={}){
  return !(scope&&(scope.accountId||scope.clientId||scope.accountType));
 }
 function officialAccountById(id){return officialAccounts().find(a=>String(a.id)===String(id))}
 function officialMovesForScope(scope={}){
  const live=officialAccountIds();
- const oukamiScope=officialGlobalBankScope(scope);
+ const oukamiScope=officialOukamiBankScope(scope);
  return rawMovesArr().filter(m=>{
   const aid=String((m&&m.account_id)||(m&&m.accountId)||'');
   if(!live.has(aid))return false;
@@ -832,10 +832,10 @@ function officialBankBalanceContribution(account,scope={}){
  const companyAcc=(typeof isCompanyAccount==='function'&&isCompanyAccount(account));
  if(companyAcc){
   // Le Compte entreprise automatique participe maintenant au calcul global
-  // du Solde banque via officialGlobalBankSoldeFromDepositsAndCredits().
+  // du Solde banque via officialOukamiBankSoldeFromDepositsAndCredits().
   // Dans sa propre fiche, son espace client et son rapport compte, il affiche
   // le solde officiel du Compte entreprise via officialAccountBalance().
-  return officialGlobalBankScope(scope)?0:officialAccountBalance(account,scope);
+  return officialOukamiBankScope(scope)?0:officialAccountBalance(account,scope);
  }
  // Règle officielle : dans le solde général de la banque, un compte crédit
  // participe uniquement avec le « Montant crédit accordé ». Les intérêts,
@@ -955,7 +955,7 @@ function officialManagementClientDepositsTotal(scope={},accounts=null){
  return Math.round(total*100)/100;
 }
 
-function officialGlobalBankSoldeFromDepositsAndCredits(scope={},accounts=null){
+function officialOukamiBankSoldeFromDepositsAndCredits(scope={},accounts=null){
  // Formule officielle unifiée pour Gestion et Carte performance :
  // Solde banque = Total Dépôt client enregistré dans Mouvements
  // - tous les frais liés ou imputés aux comptes
@@ -984,7 +984,7 @@ function officialFinancialSummary(scope={}){
  const retraits=moves.filter(officialIsRetrait);
  const totalVersements=versements.reduce((s,m)=>s+officialAmount(m),0);
  const totalRetraits=retraits.reduce((s,m)=>s+officialAmount(m),0);
- const solde=officialGlobalBankScope(scope)?officialGlobalBankSoldeFromDepositsAndCredits(scope,accounts):officialBalanceForAccounts(accounts,scope);
+ const solde=officialOukamiBankScope(scope)?officialOukamiBankSoldeFromDepositsAndCredits(scope,accounts):officialBalanceForAccounts(accounts,scope);
  return{
   clients:officialClients().length,
   accounts:officialAccounts().length,
@@ -4031,7 +4031,7 @@ function managementMonthlySoldeFromMoves(period,moves,totalRevenuBanque=0,compte
  // indépendamment des autres mois. On ne reprend pas le Solde banque du mois
  // précédent : la période affichée est recalculée à partir des soldes clients
  // de cette période et des retraits client de cette période.
- return officialGlobalBankSoldeFromDepositsAndCredits(period);
+ return officialOukamiBankSoldeFromDepositsAndCredits(period);
 }
 function managementMonthlyCreditRepaidPrincipalTotal(period={}){
  return (typeof officialCreditPrincipalRepaymentTotalForScope==='function')?officialCreditPrincipalRepaymentTotalForScope(period):0;

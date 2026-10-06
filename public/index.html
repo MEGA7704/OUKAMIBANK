@@ -1883,15 +1883,13 @@ button,a,.btn,.mini,.menu button{touch-action:manipulation;-webkit-tap-highlight
 #auth.auth.auth-modal{display:none!important}
 body.auth-popup-open #auth.auth.auth-modal{display:grid!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important}
 #auth.auth.auth-modal .auth-shell{pointer-events:auto!important}
-@media(max-width:900px){#landing .v29-nav-inner{padding:12px 14px!important;flex-wrap:wrap!important}.v29-brand{flex:1 1 100%!important}.oukami-main-nav{width:100%!important;display:grid!important;grid-template-columns:repeat(3,1fr)!important;gap:7px!important}.oukami-main-nav button{padding:10px 7px!important;font-size:11px!important}.v29-hero-grid{min-height:auto!important;grid-template-columns:1fr!important}.v29-copy{padding:42px 0 18px!important}.v29-device.v8-hero-photo{min-height:330px!important;transform:none!important;background-position:center!important}}
+@media(max-width:900px){#landing .v29-nav-inner{padding:12px 14px!important;flex-wrap:wrap!important}.v29-brand{flex:1 1 100%!important}.oukami-main-nav{width:100%!important;display:grid!important;grid-template-columns:repeat(2,1fr)!important;gap:7px!important}.oukami-main-nav button{padding:10px 7px!important;font-size:11px!important}.v29-hero-grid{min-height:auto!important;grid-template-columns:1fr!important}.v29-copy{padding:42px 0 18px!important}.v29-device.v8-hero-photo{min-height:330px!important;transform:none!important;background-position:center!important}}
 </style>\n</head>
 <body>
-<button id="globalHomeBtn" type="button" class="v24-global-home" onclick="showLanding()">⌂ Accueil</button>
-<a href="javascript:void(0)" class="global-home-fab" onclick="showLanding();return false;" aria-label="Retour à l'accueil"><span class="ico">🏠</span><span>Retour à l'accueil</span></a>
 
 
 <section id="landing" class="v29-home">
-<header class="v29-nav"><div class="v29-wrap v29-nav-inner"><a class="v29-brand" href="javascript:void(0)" onclick="showLanding();return false;"><span class="v29-logo">🤝</span><span><small>ASSOCIATION</small><b>OUKAMI DE DIABO</b><em>ÉPARGNE • SOLIDARITÉ • DÉVELOPPEMENT</em></span></a><nav class="oukami-main-nav"><button type="button" class="active" onclick="showLanding();return false;">⌂ Accueil</button><button type="button" onclick="openClientAccess();return false;">👤 Espace client</button><button type="button" onclick="openAuthLogin();return false;">▣ Administration</button></nav></div></header>
+<header class="v29-nav"><div class="v29-wrap v29-nav-inner"><a class="v29-brand" href="javascript:void(0)" onclick="showLanding();return false;"><span class="v29-logo">🤝</span><span><small>ASSOCIATION</small><b>OUKAMI DE DIABO</b><em>ÉPARGNE • SOLIDARITÉ • DÉVELOPPEMENT</em></span></a><nav class="oukami-main-nav"><button type="button" onclick="openClientAccess();return false;">👤 Espace client</button><button type="button" onclick="openAuthLogin();return false;">▣ Administration</button></nav></div></header>
 
 <main>
 <section id="about" class="v29-hero v9-hero-reference" role="img" aria-label="ASSOCIATION OUKAMI DE DIABO — épargne, solidarité et développement"><div class="v13-hero-copy"><h1>Votre association <strong>financière,</strong><br>plus proche de vous</h1><p>Un espace moderne pour suivre l’épargne, les comptes, les crédits et les opérations des membres de l’<b>ASSOCIATION OUKAMI DE DIABO</b>, avec une gestion simple, rapide et sécurisée.</p></div><div class="v9-hero-fade" aria-hidden="true"></div></section>
@@ -2107,7 +2105,7 @@ function renderMenu(){
  const visible=arr.filter(k=>!(currentRoleKey()==='admin_bank'&&hiddenAdminButtons.has(k)));
  const signature=currentRoleKey()+'|'+visible.join('|');
  if(m.dataset.menuSignature!==signature){
-  m.innerHTML=`<a href="/" class="app-menu-link" onclick="showLanding();return false;"><button type="button" class="app-home-menu">Accueil</button></a>`+visible.map(k=>k==='logout'?`<button data-page="logout" onclick="logout()">${menuLabelForRole(k)}</button>`:`<a class="app-menu-link" data-page-link="${k}" href="${pageUrl(k)}" onclick="return goPage('${k}')"><button type="button" data-page="${k}">${menuLabelForRole(k)}</button></a>`).join('');
+  m.innerHTML=visible.map(k=>k==='logout'?`<button data-page="logout" onclick="logout()">${menuLabelForRole(k)}</button>`:`<a class="app-menu-link" data-page-link="${k}" href="${pageUrl(k)}" onclick="return goPage('${k}')"><button type="button" data-page="${k}">${menuLabelForRole(k)}</button></a>`).join('');
   m.dataset.menuSignature=signature;
  }
  m.querySelectorAll('button[data-page]').forEach(btn=>btn.classList.toggle('active',btn.dataset.page===active));
@@ -2502,13 +2500,13 @@ function officialMoves(){
  const live=officialAccountIds();
  return rawMovesArr().filter(m=>live.has(String((m&&m.account_id)||(m&&m.accountId)||'')));
 }
-function officialGlobalBankScope(scope={}){
+function officialOukamiBankScope(scope={}){
  return !(scope&&(scope.accountId||scope.clientId||scope.accountType));
 }
 function officialAccountById(id){return officialAccounts().find(a=>String(a.id)===String(id))}
 function officialMovesForScope(scope={}){
  const live=officialAccountIds();
- const oukamiScope=officialGlobalBankScope(scope);
+ const oukamiScope=officialOukamiBankScope(scope);
  return rawMovesArr().filter(m=>{
   const aid=String((m&&m.account_id)||(m&&m.accountId)||'');
   if(!live.has(aid))return false;
@@ -2803,10 +2801,10 @@ function officialBankBalanceContribution(account,scope={}){
  const companyAcc=(typeof isCompanyAccount==='function'&&isCompanyAccount(account));
  if(companyAcc){
   // Le Compte entreprise automatique participe maintenant au calcul global
-  // du Solde banque via officialGlobalBankSoldeFromDepositsAndCredits().
+  // du Solde banque via officialOukamiBankSoldeFromDepositsAndCredits().
   // Dans sa propre fiche, son espace client et son rapport compte, il affiche
   // le solde officiel du Compte entreprise via officialAccountBalance().
-  return officialGlobalBankScope(scope)?0:officialAccountBalance(account,scope);
+  return officialOukamiBankScope(scope)?0:officialAccountBalance(account,scope);
  }
  // Règle officielle : dans le solde général de la banque, un compte crédit
  // participe uniquement avec le « Montant crédit accordé ». Les intérêts,
@@ -2926,7 +2924,7 @@ function officialManagementClientDepositsTotal(scope={},accounts=null){
  return Math.round(total*100)/100;
 }
 
-function officialGlobalBankSoldeFromDepositsAndCredits(scope={},accounts=null){
+function officialOukamiBankSoldeFromDepositsAndCredits(scope={},accounts=null){
  // Formule officielle unifiée pour Gestion et Carte performance :
  // Solde banque = Total Dépôt client enregistré dans Mouvements
  // - tous les frais liés ou imputés aux comptes
@@ -2955,7 +2953,7 @@ function officialFinancialSummary(scope={}){
  const retraits=moves.filter(officialIsRetrait);
  const totalVersements=versements.reduce((s,m)=>s+officialAmount(m),0);
  const totalRetraits=retraits.reduce((s,m)=>s+officialAmount(m),0);
- const solde=officialGlobalBankScope(scope)?officialGlobalBankSoldeFromDepositsAndCredits(scope,accounts):officialBalanceForAccounts(accounts,scope);
+ const solde=officialOukamiBankScope(scope)?officialOukamiBankSoldeFromDepositsAndCredits(scope,accounts):officialBalanceForAccounts(accounts,scope);
  return{
   clients:officialClients().length,
   accounts:officialAccounts().length,
@@ -5998,7 +5996,7 @@ function managementMonthlySoldeFromMoves(period,moves,totalRevenuBanque=0,compte
  // indépendamment des autres mois. On ne reprend pas le Solde banque du mois
  // précédent : la période affichée est recalculée à partir des soldes clients
  // de cette période et des retraits client de cette période.
- return officialGlobalBankSoldeFromDepositsAndCredits(period);
+ return officialOukamiBankSoldeFromDepositsAndCredits(period);
 }
 function managementMonthlyCreditRepaidPrincipalTotal(period={}){
  return (typeof officialCreditPrincipalRepaymentTotalForScope==='function')?officialCreditPrincipalRepaymentTotalForScope(period):0;
@@ -6276,7 +6274,7 @@ function gestion(){
 
 function restorePageScroll(){document.body.classList.remove('auth-popup-open');if(!document.getElementById('proModalBackdrop'))document.body.classList.remove('modal-open');document.documentElement.style.overflow='';document.body.style.overflow='';document.documentElement.style.overflowY='auto';document.body.style.overflowY='auto';}
 function isSessionConnected(){return !!(data&&role);}
-function renderLandingConnectedMenu(){const bar=$('landingConnectedMenu'),nav=$('landingUserMenu');if(!bar||!nav)return;const connected=isSessionConnected();bar.classList.remove('hidden');if(!connected){nav.innerHTML='<button class="home-active" type="button" onclick="showLanding();return false;">Accueil</button><button type="button" onclick="openAuthLogin();return false;">Se connecter</button><button class="landing-auth-primary" type="button" onclick="openClientAccess();return false;">Espace client</button>';return;}const arr=allowedPagesForRole();const hiddenAdminButtons=new Set(['utilisateurs','mailbox','notifications']);const visible=arr.filter(k=>k!=='logout'&&!(currentRoleKey()==='admin_bank'&&hiddenAdminButtons.has(k)));nav.innerHTML='<button class="home-active" type="button" onclick="showLanding();return false;">Accueil</button>'+visible.map(k=>'<button type="button" onclick="return goPageFromLanding(\''+k+'\')">'+escapeHtml(menuLabelForRole(k))+'</button>').join('')+'<button class="landing-logout-btn" type="button" onclick="logout();return false;" title="Se déconnecter" aria-label="Se déconnecter">↪</button>';}
+function renderLandingConnectedMenu(){const bar=$('landingConnectedMenu'),nav=$('landingUserMenu');if(!bar||!nav)return;const connected=isSessionConnected();bar.classList.remove('hidden');if(!connected){nav.innerHTML='<button type="button" onclick="openAuthLogin();return false;">Se connecter</button><button class="landing-auth-primary" type="button" onclick="openClientAccess();return false;">Espace client</button>';return;}const arr=allowedPagesForRole();const hiddenAdminButtons=new Set(['utilisateurs','mailbox','notifications']);const visible=arr.filter(k=>k!=='logout'&&!(currentRoleKey()==='admin_bank'&&hiddenAdminButtons.has(k)));nav.innerHTML=visible.map(k=>'<button type="button" onclick="return goPageFromLanding(\''+k+'\')">'+escapeHtml(menuLabelForRole(k))+'</button>').join('')+'<button class="landing-logout-btn" type="button" onclick="logout();return false;" title="Se déconnecter" aria-label="Se déconnecter">↪</button>';}
 function goPageFromLanding(page){if(!isSessionConnected()){renderLandingConnectedMenu();showLanding();return false;}const l=$('landing'),a=$('auth'),app=$('app');if(l)l.style.display='none';if(a)a.style.display='none';if(app)app.style.display='block';restorePageScroll();applyRoleShell();if(hasPageAccess(page))active=page;else active=allowedPagesForRole().find(x=>x!=='logout')||'dashboard';syncPageUrl(active);renderMenu();render();closeMobileMenu();requestAnimationFrame(()=>window.scrollTo(0,0));return false;}
 function showLanding(opts={}){const l=$('landing'),a=$('auth'),app=$('app');if(l)l.style.display='block';if(a)a.style.display='none';if(app)app.style.display='none';if(!opts.fromHistory)syncHomeUrl(!!opts.replace);restorePageScroll();renderLandingConnectedMenu();requestAnimationFrame(()=>window.scrollTo(0,0));return false;}
 function showAuth(){const l=$('landing'),a=$('auth'),app=$('app');if(l)l.style.display='block';if(app)app.style.display='none';document.body.classList.add('auth-popup-open');if(a){a.style.setProperty('display','grid','important');a.setAttribute('aria-hidden','false');}}
