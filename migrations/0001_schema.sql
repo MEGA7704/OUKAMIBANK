@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS banks (
   pass TEXT NOT NULL,
   auth_version INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'Actif',
-  subscription TEXT NOT NULL DEFAULT 'FREE',
+  subscription TEXT NOT NULL DEFAULT 'PENDING',
   subscription_started_at TEXT DEFAULT '',
   subscription_expires_at TEXT DEFAULT '',
   subscription_updated_at TEXT DEFAULT '',
