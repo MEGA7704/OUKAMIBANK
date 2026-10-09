@@ -934,6 +934,38 @@ async function handleApi(request,env,path){
   if(s.role!=='bank')return json({error:'Action réservée à une banque.'},403); const bankId=s.bankId; await requireActiveBankSubscription(env,bankId);
   const roleDenied=await enforceRoleApiAccess(env,bankId,s,path,request); if(roleDenied)return roleDenied;
 
+
+  if((path==='/api/backup/export'||path==='/api/backup/import')){
+   if(sessionRoleKey(s)!=='admin_bank')return json({error:'Accès réservé à l’administrateur de l’association.'},403);
+   const excluded=new Set(['banks','users','security_logs','logs','reset_requests','support_messages']);
+   const tables=(await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()).results||[];
+   const names=[];
+   for(const item of tables){if(excluded.has(item.name)||!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(item.name))continue;const cols=(await env.DB.prepare('PRAGMA table_info("'+item.name+'")').all()).results||[];if(cols.some(c=>c.name==='bank_id'))names.push(item.name);}
+   if(path==='/api/backup/export'&&request.method==='GET'){
+    const result={format:'OUKAMI_BACKUP_V1',created_at:new Date().toISOString(),association_id:bankId,tables:{}};
+    for(const name of names)result.tables[name]=(await env.DB.prepare('SELECT * FROM "'+name+'" WHERE bank_id=?').bind(bankId).all()).results||[];
+    return json(result);
+   }
+   if(path==='/api/backup/import'&&request.method==='POST'){
+    const payload=await body(request),backup=payload.backup;
+    if(!backup||backup.format!=='OUKAMI_BACKUP_V1'||!backup.tables||typeof backup.tables!=='object'||Array.isArray(backup.tables))return json({error:'Sauvegarde non reconnue.'},400);
+    if(Object.keys(backup.tables).some(n=>!names.includes(n)))return json({error:'La sauvegarde contient des tables inconnues ou interdites.'},400);
+    if(Object.keys(backup.tables).some(n=>!Array.isArray(backup.tables[n])||backup.tables[n].length>15000))return json({error:'Volume ou structure de sauvegarde invalide.'},400);
+    for(const name of names){const existing=await env.DB.prepare('SELECT COUNT(*) AS n FROM "'+name+'" WHERE bank_id=?').bind(bankId).first();if(Number(existing?.n||0)>0)return json({error:'Importation refusée : l’association contient déjà des données ('+name+'). Exportez une sauvegarde avant de migrer.'},409);}
+    const statements=[];let count=0;
+    for(const [name,rows] of Object.entries(backup.tables)){
+     const cols=(await env.DB.prepare('PRAGMA table_info("'+name+'")').all()).results||[];const allowed=new Set(cols.map(c=>c.name));
+     for(const row of rows){if(!row||typeof row!=='object'||Array.isArray(row)||!Object.keys(row).length||Object.keys(row).some(k=>!allowed.has(k))||row.bank_id!==backup.association_id)return json({error:'Ligne de sauvegarde invalide dans '+name},400);
+      const keys=Object.keys(row);const values=keys.map(k=>k==='bank_id'?bankId:row[k]);if(values.some(v=>v!==null&&typeof v!=='string'&&typeof v!=='number'))return json({error:'Valeur invalide dans '+name},400);
+      statements.push(env.DB.prepare('INSERT INTO "'+name+'" ('+keys.map(k=>'"'+k+'"').join(',')+') VALUES ('+keys.map(()=>'?').join(',')+')').bind(...values));count++;
+     }
+    }
+    if(statements.length>0)await env.DB.batch(statements);
+    await addSecurityLog(env,bankId,s,'Importation de sauvegarde','Paramètres','autorisé',String(count)+' enregistrements');
+    return json({ok:true,count});
+   }
+  }
+
   if(path==='/api/messages'&&request.method==='GET'){
    if(sessionRoleKey(s)!=='admin_bank')return json({error:'Messagerie réservée à l’Administrateur banque.'},403);
    return json({items:await listBankSupportMessages(env,bankId)});
