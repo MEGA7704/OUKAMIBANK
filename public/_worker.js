@@ -662,6 +662,7 @@ async function permissionForRequest(path,request){
  if(path==='/api/messages'||path.startsWith('/api/messages/'))return 'messages.manage';
  if(path==='/api/admin/verify-password')return 'settings.manage';
  if(path==='/api/bank/update')return 'settings.manage';
+ if(path.startsWith('/api/backup/'))return 'settings.manage';
  if(path==='/api/client'&&method==='POST')return 'clients.create';
  if(path==='/api/client/update'&&method==='POST')return 'clients.update';
  if(path==='/api/client/block'&&method==='POST')return 'clients.block';
@@ -846,6 +847,43 @@ async function handleApi(request,env,path){
    if(s.role==='super'){const banks=await env.DB.prepare(bankListSelect()).all();const users=await env.DB.prepare('SELECT u.id,u.bank_id,u.name,u.login,u.role,u.status,u.last_login,u.created_at,b.name AS bank_name FROM users u LEFT JOIN banks b ON b.id=u.bank_id ORDER BY u.created_at DESC LIMIT 500').all();return json({role:'super',banks:banks.results||[],users:users.results||[]});}
    await requireActiveBankSubscription(env,s.bankId);return json({role:'bank',...(await bankPayload(env,s.bankId,s))});
   }
+
+  if(path==='/api/backup/export'&&request.method==='GET' || path==='/api/backup/import'&&request.method==='POST'){
+   if(s.role!=='bank'||sessionRoleKey(s)!=='admin_bank')return json({error:'Réservé à l’administrateur de l’entreprise.'},403);
+   await requireActiveBankSubscription(env,s.bankId);
+   const tables=['clients','accounts','moves','logs','security_logs','charge_bases','obligations','reset_requests','account_types','movement_types','manual_revenues','ignored_revenues','management_settings','operation_requests'];
+   const schema=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
+   const existing=new Set((schema.results||[]).map(x=>x.name));
+   const supported=tables.filter(x=>existing.has(x));
+   // Les messages sont liés par recipient_bank_id et non par bank_id.
+   if(existing.has('support_messages'))supported.push('support_messages');
+   const scopeColumn=name=>name==='support_messages'?'recipient_bank_id':'bank_id';
+   if(request.method==='GET'){
+    const result={format:'OUKAMI_COMPANY_BACKUP_V1',exported_at:new Date().toISOString(),company_id:s.bankId,tables:{}};
+    for(const name of supported){const rows=await env.DB.prepare('SELECT * FROM '+name+' WHERE '+scopeColumn(name)+'=?').bind(s.bankId).all();result.tables[name]=rows.results||[];}
+    return json(result,200,{'cache-control':'no-store','content-disposition':'attachment; filename="oukami-backup.json"'});
+   }
+   const raw=await request.text();if(raw.length>12000000)return json({error:'Fichier trop volumineux.'},413);
+   let input;try{input=JSON.parse(raw)}catch(e){return json({error:'JSON invalide.'},400)}
+   if(input.format!=='OUKAMI_COMPANY_BACKUP_V1'||!input.tables||typeof input.tables!=='object'||Array.isArray(input.tables))return json({error:'Format de sauvegarde non reconnu.'},400);
+   if(String(input.company_id)!==String(s.bankId))return json({error:'La sauvegarde appartient à une autre entreprise.'},403);
+   const statements=[];let count=0;
+   for(const name of supported){
+    if(!Object.prototype.hasOwnProperty.call(input.tables,name))continue;
+    const rows=input.tables[name];if(!Array.isArray(rows)||rows.length>30000)return json({error:'Table invalide : '+name},400);
+    const info=await env.DB.prepare('PRAGMA table_info('+name+')').all();const cols=(info.results||[]).map(x=>x.name);const scope=scopeColumn(name);if(!cols.includes(scope))continue;
+    statements.push(env.DB.prepare('DELETE FROM '+name+' WHERE '+scope+'=?').bind(s.bankId));
+    for(const row of rows){if(!row||typeof row!=='object'||Array.isArray(row)||String(row[scope])!==String(s.bankId))return json({error:'Ligne ou entreprise invalide : '+name},400);
+     const keys=Object.keys(row);if(!keys.length||keys.some(k=>!cols.includes(k))||(name==='support_messages'&&row.sender_type==='super'))return json({error:'Colonnes invalides : '+name},400);
+     statements.push(env.DB.prepare('INSERT INTO '+name+' ('+keys.join(',')+') VALUES ('+keys.map(()=>'?').join(',')+')').bind(...keys.map(k=>row[k]===undefined?null:row[k])));count++;
+    }
+   }
+   if(statements.length>10000)return json({error:'Import trop important pour une opération.'},413);
+   if(!statements.length)return json({error:'Aucune donnée compatible.'},400);
+   await env.DB.batch(statements);
+   return json({ok:true,rows:count});
+  }
+
   if(path==='/api/save'&&request.method==='POST'){
    if(s.role!=='bank'||sessionRoleKey(s)!=='admin_bank')return json({error:'Enregistrement global réservé à l’Administrateur banque.'},403);
    const payload=await body(request);if(payload.bank_id&&String(payload.bank_id)!==String(s.bankId))return json({error:'Accès inter-entreprise interdit.'},403);
