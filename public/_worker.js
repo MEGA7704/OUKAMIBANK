@@ -734,39 +734,22 @@ function bankListSelect(){return "SELECT id,name,manager,contact,address,email,l
 async function bankPayload(env,bankId,session={}){
  const bank=await env.DB.prepare('SELECT id,name,manager,contact,address,email,slogan,logo,stamp,signature,primary_color,secondary_color,footer_text,legal_mentions,cga_conditions,currency,country,city,login,status,subscription,subscription_started_at,subscription_expires_at,subscription_updated_at,created_at FROM banks WHERE id=?').bind(bankId).first();
  if(bank)Object.assign(bank,subscriptionInfo(bank));await seedDefaultCharges(env,bankId);await ensureCompanyAccount(env,bankId);
- const [clientsQ,accountsQ,movesQ,voidedQ,usersQ,logsQ,chargeQ,obligationsQ,resetQ,accountTypesQ,movementTypesQ,manualQ,ignoredQ,securityQ,requestQ]=await Promise.all([
-env.DB.prepare("SELECT id,bank_id,name,contact,job,address,piece,client_type,client_details,photo_logo,is_blocked,is_deleted,created_at FROM clients WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all(),
-env.DB.prepare("SELECT * FROM accounts WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all(),
-env.DB.prepare("SELECT m.* FROM moves m JOIN accounts a ON a.id=m.account_id AND a.bank_id=m.bank_id WHERE m.bank_id=? AND COALESCE(m.is_voided,0)=0 ORDER BY m.created_at DESC LIMIT 1500").bind(bankId).all(),
-env.DB.prepare("SELECT * FROM moves WHERE bank_id=? AND COALESCE(is_voided,0)=1 ORDER BY voided_at DESC LIMIT 300").bind(bankId).all(),
-env.DB.prepare("SELECT id,bank_id,name,login,role,status,permissions,last_login,is_deleted,created_at FROM users WHERE bank_id=? AND COALESCE(is_deleted,0)=0 ORDER BY created_at DESC").bind(bankId).all(),
-env.DB.prepare('SELECT * FROM logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all(),
-env.DB.prepare('SELECT * FROM charge_bases WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
-env.DB.prepare('SELECT * FROM obligations WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
-env.DB.prepare('SELECT * FROM reset_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 100').bind(bankId).all(),
-env.DB.prepare('SELECT * FROM account_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
-env.DB.prepare('SELECT * FROM movement_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
-env.DB.prepare('SELECT * FROM manual_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
-env.DB.prepare('SELECT * FROM ignored_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
-env.DB.prepare('SELECT * FROM security_logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all(),
-env.DB.prepare('SELECT * FROM operation_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all()
-]);
- 
+ const clientsQ=await env.DB.prepare("SELECT id,bank_id,name,contact,job,address,piece,client_type,client_details,photo_logo,is_blocked,is_deleted,created_at FROM clients WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all();
  const allClients=(clientsQ.results||[]).map(c=>({...c,photo_logo:isClientMediaRef(c.photo_logo)?clientMediaPublicUrl(c.id):String(c.photo_logo||'')}));
- const allAccounts=accountsQ.results||[];
- const allMoves=movesQ.results||[];
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
- 
+ const accountsQ=await env.DB.prepare("SELECT * FROM accounts WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all();const allAccounts=accountsQ.results||[];
+ const movesQ=await env.DB.prepare("SELECT m.* FROM moves m JOIN accounts a ON a.id=m.account_id AND a.bank_id=m.bank_id WHERE m.bank_id=? AND COALESCE(m.is_voided,0)=0 ORDER BY m.created_at DESC LIMIT 1500").bind(bankId).all();const allMoves=movesQ.results||[];
+ const voidedQ=await env.DB.prepare("SELECT * FROM moves WHERE bank_id=? AND COALESCE(is_voided,0)=1 ORDER BY voided_at DESC LIMIT 300").bind(bankId).all();
+ const usersQ=await env.DB.prepare("SELECT id,bank_id,name,login,role,status,permissions,last_login,is_deleted,created_at FROM users WHERE bank_id=? AND COALESCE(is_deleted,0)=0 ORDER BY created_at DESC").bind(bankId).all();
+ const logsQ=await env.DB.prepare('SELECT * FROM logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all();
+ const chargeQ=await env.DB.prepare('SELECT * FROM charge_bases WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const obligationsQ=await env.DB.prepare('SELECT * FROM obligations WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const resetQ=await env.DB.prepare('SELECT * FROM reset_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 100').bind(bankId).all();
+ const accountTypesQ=await env.DB.prepare('SELECT * FROM account_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const movementTypesQ=await env.DB.prepare('SELECT * FROM movement_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const manualQ=await env.DB.prepare('SELECT * FROM manual_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const ignoredQ=await env.DB.prepare('SELECT * FROM ignored_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const securityQ=await env.DB.prepare('SELECT * FROM security_logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all();
+ const requestQ=await env.DB.prepare('SELECT * FROM operation_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all();
  const management_settings=await managementSettings(env,bankId);const rk=sessionRoleKey(session);const perms=sessionPermissions(session);const uidValue=String(session.userId||'');
  const user={id:uidValue,name:session.userName||bank.manager||'Utilisateur',login:session.userLogin||bank.login||'',role:roleLabel(session.userRole||'Administrateur banque'),role_key:rk,permissions:perms,status:'Actif',last_login:session.lastLogin||'',readonly:rk==='auditeur'};
  const activeClients=allClients.filter(c=>Number(c.is_deleted||0)!==1);const activeAccounts=allAccounts.filter(a=>Number(a.is_deleted||0)!==1&&!norm(a.status).includes('supprim'));
