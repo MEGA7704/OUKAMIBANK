@@ -4,7 +4,7 @@
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ASSOCIATION OUKAMI DE DIABO </title>
 
-<!-- Large hero image no longer blocks critical login resources. -->
+<link rel="preload" as="image" href="/assets/landing-hero-dashboard.png">
 <style id="premium-dashboard-ui-v2">
 @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800&family=Inter:wght@400;500;600;700;800;900&display=swap');
 :root{--deep:#003b3b;--deep2:#00524d;--deep3:#012c2d;--gold:#e7ad2f;--gold2:#f6ca64;--ink:#052b31;--muted:#64748b;--line:#e7edf2;--green:#16a34a;--red:#ef4444;--blue:#3b82f6;--purple:#8b5cf6;--bg:#f6f8fb;--shadow:0 18px 45px rgba(15,23,42,.08)}
@@ -2096,7 +2096,6 @@ function goPage(page,opts={}){
  if(!opts.fromHistory)syncPageUrl(page,!!opts.replace);
  if(active===page){restorePageScroll();return false;}
  active=page;renderMenu();restorePageScroll();
- if(page==='mouvements'&&!d1History.loaded)loadD1History(1);
  // Laisse le navigateur peindre immédiatement le clic/menu fermé sur mobile, puis rend la page.
  requestAnimationFrame(()=>{render();window.scrollTo(0,0);});
  return false;
@@ -2313,7 +2312,7 @@ async function login(ev){
     if(btn){btn.disabled=false;if(btn.dataset.oldText)btn.textContent=btn.dataset.oldText;}
   }
 }
-async function load(){data=await api('/me');role=data.role}async function refresh(){await load();if(active==='mouvements'){d1History.loaded=false;await loadD1History(d1History.page);}render()}
+async function load(){data=await api('/me');role=data.role}async function refresh(){await load();render()}
 function applyRoleShell(){
  const app=$('app'),key=currentRoleKey(),name=role==='super'?'Super Admin':((data&&data.user&&data.user.name)||(data&&data.bank&&data.bank.manager)||'Utilisateur');
  const isAgent=['agent_caisse','agent_credit','auditeur'].includes(key);
@@ -4316,27 +4315,13 @@ function doMoveSearch(){moveSearch=($('moveSearchInput')&&$('moveSearchInput').v
 function clearMoveSearch(){moveSearch='';resetListPage('moves');render();}
 /* === FIN CORRECTION RECHERCHE === */
 
-// Historique paginé côté D1 ; les données de calcul existantes restent inchangées.
-const d1History={items:[],total:0,page:1,limit:25,q:'',loaded:false,loading:false,error:''};
-async function loadD1History(page=1){
- if(d1History.loading)return;
- d1History.loading=true;d1History.error='';d1History.page=page;
- try{
-  const q=String(moveSearch||'').trim();
-  const result=await api('/moves/page?page='+page+'&limit='+d1History.limit+'&q='+encodeURIComponent(q),null,'GET');
-  d1History.items=result.items||[];d1History.total=Number(result.total||0);d1History.loaded=true;d1History.q=q;
- }catch(e){d1History.error=e.message||'Chargement impossible';}
- finally{d1History.loading=false;if(active==='mouvements')render();}
-}
-function changeD1HistoryPage(page){if(page<1||page>Math.ceil(d1History.total/d1History.limit))return;loadD1History(page);}
-function searchD1History(){d1History.loaded=false;loadD1History(1);}
 function mouvements(){
  const movementAdminActions=isAdminRole();
- const totalPages=Math.ceil(d1History.total/d1History.limit);
- const pageInfo=d1History.loading?'Chargement des opérations…':d1History.error?'Erreur : '+escapeHtml(d1History.error):d1History.total+' opération(s)';
+ let q=String(moveSearch||'').trim();
+ let shownMoves=getFilteredMovesForSearch(q);
+ let pagedMoves=paginateRows(shownMoves,'moves');
  const typeButtons=movementAdminActions?`<button class="mini movementAddTypeBtn" onclick="addMovementType()">+ Nouveau type de mouvement</button><button class="mini danger movementDeleteTypeBtn" onclick="openDeleteMovementTypeModal()">Supprimer type de mouvement</button>`:'';
- const controls=`<div class="pagination"><button class="mini" ${d1History.page<=1?'disabled':''} onclick="changeD1HistoryPage(${d1History.page-1})">← Précédent</button> Page ${d1History.page} / ${Math.max(1,totalPages)} <button class="mini" ${d1History.page>=totalPages?'disabled':''} onclick="changeD1HistoryPage(${d1History.page+1})">Suivant →</button></div>`;
- return welcome()+`<section class="movementPageFull"><div class="panel movementHistoryPanel" id="movesPrintArea"><div class="panelTitle"><h2>Historique des opérations</h2><span class="badge gold">${pageInfo}</span></div><div class="searchBarPremium movementToolbar"><div class="field"><label>Recherche par N° compte / date / client</label><input id="moveSearchInput" value="${escapeHtml(moveSearch||'')}" oninput="moveSearch=this.value" onkeydown="if(event.key==='Enter')searchD1History()" placeholder="N° compte, nom client ou opération"></div><button class="btn white" onclick="searchD1History()">Rechercher</button><button class="mini" onclick="moveSearch='';searchD1History()">Effacer</button><button class="mini" onclick="printSection('movesPrintArea')">Imprimer la page</button><button class="btn movementNewPopupBtn" onclick="openMovementCreateModal()">+ Nouveau mouvement</button>${typeButtons}</div>${movementAdminActions?bulkDeleteToolbar('moves'):''}${d1History.loaded?moveTable(d1History.items,movementAdminActions):'<p>Chargement de l’historique…</p>'}${controls}</div></section>`;
+ return welcome()+`<section class="movementPageFull"><div class="panel movementHistoryPanel" id="movesPrintArea"><div class="panelTitle"><h2>Historique des opérations</h2><span class="badge gold">${shownMoves.length} opération(s)</span></div><div class="searchBarPremium movementToolbar"><div class="field"><label>Recherche par N° compte / date / client</label><input id="moveSearchInput" value="${escapeHtml(moveSearch||'')}" oninput="doMoveSearch()" onkeydown="if(event.key==='Enter')doMoveSearch()" placeholder="Ex : BM-2026, 2026-06-07 ou nom client"></div><button class="btn white" onclick="doMoveSearch()">Rechercher</button><button class="mini" onclick="clearMoveSearch()">Effacer</button><button class="mini" onclick="printSection('movesPrintArea')">Imprimer</button><button class="btn movementNewPopupBtn" onclick="openMovementCreateModal()">+ Nouveau mouvement</button>${typeButtons}</div>${movementAdminActions?bulkDeleteToolbar('moves'):''}${moveTable(pagedMoves,movementAdminActions)}${paginationControls('moves',shownMoves.length)}</div></section>`
 }
 function openMovementCreateModal(){
  const accList=activeMovementAccounts();
@@ -6296,7 +6281,7 @@ function gestion(){
 function restorePageScroll(){document.body.classList.remove('auth-popup-open');if(!document.getElementById('proModalBackdrop'))document.body.classList.remove('modal-open');document.documentElement.style.overflow='';document.body.style.overflow='';document.documentElement.style.overflowY='auto';document.body.style.overflowY='auto';}
 function isSessionConnected(){return !!(data&&role);}
 function renderLandingConnectedMenu(){const bar=$('landingConnectedMenu'),nav=$('landingUserMenu');if(!bar||!nav)return;const connected=isSessionConnected();bar.classList.remove('hidden');if(!connected){nav.innerHTML='<button type="button" onclick="openAuthLogin();return false;">Se connecter</button><button class="landing-auth-primary" type="button" onclick="openClientAccess();return false;">Espace client</button>';return;}const arr=allowedPagesForRole();const hiddenAdminButtons=new Set(['utilisateurs','mailbox','notifications']);const visible=arr.filter(k=>k!=='logout'&&!(currentRoleKey()==='admin_bank'&&hiddenAdminButtons.has(k)));nav.innerHTML=visible.map(k=>'<button type="button" onclick="return goPageFromLanding(\''+k+'\')">'+escapeHtml(menuLabelForRole(k))+'</button>').join('')+'<button class="landing-logout-btn" type="button" onclick="logout();return false;" title="Se déconnecter" aria-label="Se déconnecter">↪</button>';}
-function goPageFromLanding(page){if(!isSessionConnected()){renderLandingConnectedMenu();showLanding();return false;}const l=$('landing'),a=$('auth'),app=$('app');if(l)l.style.display='none';if(a)a.style.display='none';if(app)app.style.display='block';restorePageScroll();applyRoleShell();if(hasPageAccess(page))active=page;else active=allowedPagesForRole().find(x=>x!=='logout')||'dashboard';syncPageUrl(active);renderMenu();if(active==='mouvements'&&!d1History.loaded)loadD1History(1);render();closeMobileMenu();requestAnimationFrame(()=>window.scrollTo(0,0));return false;}
+function goPageFromLanding(page){if(!isSessionConnected()){renderLandingConnectedMenu();showLanding();return false;}const l=$('landing'),a=$('auth'),app=$('app');if(l)l.style.display='none';if(a)a.style.display='none';if(app)app.style.display='block';restorePageScroll();applyRoleShell();if(hasPageAccess(page))active=page;else active=allowedPagesForRole().find(x=>x!=='logout')||'dashboard';syncPageUrl(active);renderMenu();render();closeMobileMenu();requestAnimationFrame(()=>window.scrollTo(0,0));return false;}
 function showLanding(opts={}){const l=$('landing'),a=$('auth'),app=$('app');if(l)l.style.display='block';if(a)a.style.display='none';if(app)app.style.display='none';if(!opts.fromHistory)syncHomeUrl(!!opts.replace);restorePageScroll();renderLandingConnectedMenu();requestAnimationFrame(()=>window.scrollTo(0,0));return false;}
 function showAuth(){const l=$('landing'),a=$('auth'),app=$('app');if(l)l.style.display='block';if(app)app.style.display='none';document.body.classList.add('auth-popup-open');if(a){a.style.setProperty('display','grid','important');a.setAttribute('aria-hidden','false');}}
 function closeAuthPopup(){const a=$('auth'),l=$('landing'),app=$('app');if(a){a.style.setProperty('display','none','important');a.setAttribute('aria-hidden','true');}restorePageScroll();if(!app||app.style.display!=='block'){if(l)l.style.display='block';renderLandingConnectedMenu();}return false;}
