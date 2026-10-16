@@ -63,3 +63,15 @@ Compte unique à créer : **mega@services.local**. Le mot de passe est choisi au
 **Alternative sans injection directe** : `node scripts/bootstrap-admin.mjs --sql` affiche le SQL pour la console D1 ; conserver cette sortie strictement privée. Si le compte existe déjà, le script ne le remplace pas : utiliser une procédure de réinitialisation autorisée, jamais une suppression arbitraire.
 
 **Sécurité et limites** : ce script nécessite un terminal interactif et une session Cloudflare autorisée ; il n'intègre pas de mot de passe prédéfini. Il ne peut pas initialiser Cloudflare à distance depuis un navigateur. La plateforme reste un socle partiel non homologué pour la banque réelle.
+
+
+## Initialisation automatique du Super Admin (sans terminal)
+
+Après avoir appliqué la migration D1 (les tables doivent exister), rendez-vous dans **Cloudflare Pages > Paramètres > Variables et secrets**, pour l'environnement de production :
+
+- `SUPER_ADMIN_EMAIL` : texte, valeur `mega@services.local`
+- `SUPER_ADMIN_INITIAL_PASSWORD` : **secret**, mot de passe unique et robuste (12 à 256 caractères)
+
+Vérifiez les liaisons `DB` (D1 `mega_bank_db`) et `CACHE` (KV `mega_bank_kv`). Redéployez le projet pour appliquer ces valeurs. Ouvrez `/api/setup-status` : la création du premier Super Admin est automatiquement tentée uniquement s'il n'existe aucun compte `superadmin`. Connectez-vous avec l'adresse et le secret définis. Le logiciel exige un changement de mot de passe à la première connexion. **Une fois le compte créé, supprimez immédiatement `SUPER_ADMIN_INITIAL_PASSWORD` des secrets Cloudflare et redéployez.**
+
+Le serveur ne renvoie jamais le secret ni le hash du mot de passe au navigateur. La création n'écrase aucun compte existant et n'est pas déclenchée lorsque les secrets sont manquants. Une requête GET `/api/setup-status` réalise le bootstrap initial une seule fois : n'utilisez ce mécanisme que pour la mise en service, avec une adresse et un mot de passe choisis par l'administrateur. La création nécessite une migration D1 préalable. Ne pas utiliser sur une base de données d'un autre projet.

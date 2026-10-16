@@ -15,6 +15,21 @@ const within=(x,max=160)=>typeof x==='string'&&x.trim().length>0&&x.length<=max;
 async function actor(req,db){const token=cookies(req).mega_session;if(!token||!/^[0-9a-f-]{36}$/.test(token))return null;const idh=await hash(token);const row=await db.prepare(`SELECT s.csrf_hash,s.expires_at,u.id,u.institution_id,u.email,u.display_name,u.role,u.active,u.force_password_change,i.active AS institution_active FROM sessions s JOIN users u ON s.user_id=u.id LEFT JOIN institutions i ON i.id=u.institution_id WHERE s.id_hash=?`).bind(idh).first();if(!row||!row.active||row.institution_id&&!row.institution_active||Date.parse(row.expires_at)<=Date.now())return null;return row}
 async function audit(db,u,action,detail){await db.prepare('INSERT INTO audit_logs(id,user_id,institution_id,action,detail) VALUES(?,?,?,?,?)').bind(rand(),u?.id||null,u?.institution_id||null,action,detail||'').run()}
 const id=()=>rand();
+async function ensureInitialSuperAdmin(db,env){
+ const email=String(env.SUPER_ADMIN_EMAIL||'').trim().toLowerCase();
+ const password=env.SUPER_ADMIN_INITIAL_PASSWORD;
+ if(!email||typeof password!=='string'||password.length<12||password.length>256)return;
+ if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return;
+ // Never reset an existing account or create a second system administrator.
+ const exists=await db.prepare("SELECT id FROM users WHERE role='superadmin' LIMIT 1").first();
+ if(exists)return;
+ const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
+ const ph=await pbkdf(password,salt,310000);
+ const newId=id();
+ // Atomic conditional insertion. UNIQUE(email) and the conditional query prevent replacing the intended account.
+ await db.prepare("INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) SELECT ?,NULL,?,'Super Administrateur','superadmin',?,?,310000,1,1 WHERE NOT EXISTS (SELECT 1 FROM users WHERE role='superadmin') AND NOT EXISTS (SELECT 1 FROM users WHERE email=?)")
+  .bind(newId,email,ph,salt,email).run();
+}
 async function route(req,env){const db=env.DB;if(!db)return json({error:'D1_NOT_CONFIGURED'},503);const url=new URL(req.url),p=url.pathname,method=req.method;let body={};if(method==='POST'||method==='PATCH'){if(Number(req.headers.get('content-length')||0)>100000)return json({error:'BODY_TOO_LARGE'},413);try{body=await req.json()}catch{return json({error:'INVALID_JSON'},400)}}
 if(p==='/api/setup-status'&&method==='GET'){
  const required=['institutions','users','sessions','plans','clients','accounts','transactions','audit_logs'];
@@ -26,10 +41,12 @@ if(p==='/api/setup-status'&&method==='GET'){
  const cols=new Set((columns.results||[]).map(x=>x.name));
  const missingColumns=['password_hash','password_salt','password_iterations','active','role','institution_id'].filter(x=>!cols.has(x));
  if(missingColumns.length)return json({ready:false,error:'DATABASE_SCHEMA_INCOMPATIBLE',missing_columns:missingColumns},503);
+ await ensureInitialSuperAdmin(db,env);
  const admins=await db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='superadmin' AND active=1").first();
  return json({ready:!!admins?.n,error:admins?.n?null:'SUPERADMIN_NOT_INITIALIZED'});
 }
 if(p==='/api/login'&&method==='POST'){
+ await ensureInitialSuperAdmin(db,env);
  const email=String(body.email||'').trim().toLowerCase(),pw=String(body.password||'');if(!email||pw.length>256)return json({error:'INVALID_CREDENTIALS'},401);
  const ip=(req.headers.get('cf-connecting-ip')||'unknown').slice(0,128);const key='login:'+await hash(ip+'|'+email);let attempts=Number(await env.CACHE?.get(key)||0);if(attempts>=8)return json({error:'TOO_MANY_ATTEMPTS'},429);
  const u=await db.prepare('SELECT * FROM users WHERE email=?').bind(email).first();const valid=u&&u.active&&typeof u.password_salt==='string'&&/^(?:[0-9a-f]{2})+$/i.test(u.password_salt)&&Number.isInteger(u.password_iterations)&&u.password_iterations>=100000&&typeof u.password_hash==='string'&&eq(await pbkdf(pw,u.password_salt,u.password_iterations),u.password_hash);if(!valid){await env.CACHE?.put(key,String(attempts+1),{expirationTtl:900});return json({error:'INVALID_CREDENTIALS'},401)}
