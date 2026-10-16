@@ -1,16 +1,6 @@
-name = "oukami2"
-pages_build_output_dir = "public"
-compatibility_date = "2026-08-01"
-
-# Variable non sensible, chargée automatiquement dans env.SUPER_ADMIN_SESSION_VERSION.
-# Incrémentez cette valeur après chaque changement du mot de passe Super Admin
-# afin d'invalider toutes les sessions précédentes.
-[vars]
-SUPER_ADMIN_SESSION_VERSION = "1"
-SUPER_ADMIN_LOGIN = "mega@services.local"
-
-# SUPER_ADMIN_LOGIN n’est pas sensible. Le mot de passe Super Admin reste exclusivement
-# un secret chiffré Cloudflare : SUPER_ADMIN_PASSWORD (ne jamais le publier dans le dépôt).
+name = "mega-bank-new"
+compatibility_date = "2026-09-01"
+pages_build_output_dir = "./public"
 
 [[d1_databases]]
 binding = "DB"
@@ -18,5 +8,5 @@ database_name = "oukami2_d1"
 database_id = "e065681b-4cb0-4afa-88d8-3263298492bf"
 
 [[kv_namespaces]]
-binding = "KV"
+binding = "CACHE"
 id = "9467009dd39643b48a75a71fabcfa218"
