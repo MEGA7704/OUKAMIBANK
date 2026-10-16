@@ -1,12 +1,12 @@
-name = "mega-bank-new"
+name = "mega-bank"
 compatibility_date = "2026-09-01"
 pages_build_output_dir = "./public"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "oukami2_d1"
-database_id = "e065681b-4cb0-4afa-88d8-3263298492bf"
+database_name = "mega_bank_db"
+database_id = "c837aa59-2d73-4c0f-a349-5a6f40d6988a"
 
 [[kv_namespaces]]
 binding = "CACHE"
-id = "9467009dd39643b48a75a71fabcfa218"
+id = "ef310bad3c6b4a6e9ea9db6c2edb6f91"

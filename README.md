@@ -12,8 +12,8 @@ Crédits et échéanciers, pénalités, comptabilité en partie double, gestion 
 
 ## Installer
 1. Pousser ce dossier dans un **nouveau** dépôt GitHub (sans mélanger les anciens projets).
-2. Dans Cloudflare Pages, créer un nouveau projet et relier ce dépôt. Configurer `DB` comme D1 et `CACHE` comme KV (identifiants déjà déclarés dans `wrangler.toml`). Attention : les noms/IDs fournis sont déjà ceux de ressources existantes ; pour une isolation réellement indépendante, créez de **nouvelles ressources** et remplacez leurs identifiants dans wrangler.toml.
-3. Appliquer `migrations/0001_initial.sql` sur la base D1 : `npx wrangler d1 execute oukami2_d1 --remote --file=migrations/0001_initial.sql` (après vérification de la base cible). **Ne jamais appliquer cette migration sur une base contenant les données d'un autre projet.**
+2. Dans Cloudflare Pages, créer un nouveau projet et relier ce dépôt. Configurer `DB` comme D1 et `CACHE` comme KV (identifiants déjà déclarés dans `wrangler.toml`). Attention : la base et le KV déclarés doivent être réservés à MEGA BANK.
+3. Appliquer `migrations/0001_initial.sql` sur la base D1 : `npx wrangler d1 execute mega_bank_db --remote --file=migrations/0001_initial.sql` (après vérification de la base cible). **Ne jamais appliquer cette migration sur une base contenant les données d'un autre projet.**
 4. Sur votre terminal de confiance, générer l'instruction de création du superadmin : `node scripts/bootstrap-admin.mjs mega@services.local 'CHOISIR_UN_MOT_DE_PASSE_FORT'` puis exécuter le SQL produit dans D1. Le mot de passe initial du cahier des charges n'est volontairement pas intégré au dépôt ; changez-le dès la première connexion.
 5. Déployer depuis GitHub / Cloudflare Pages. L'administrateur doit créer une institution, puis un administrateur bancaire pour celle-ci.
 6. Exécuter `npm test` pour des tests structurels minimaux. Prévoir une suite d'intégration, sécurité, audit et charge avant toute mise en service réelle.
@@ -41,3 +41,10 @@ Le message `SERVER_ERROR` est une réponse générique : il ne prouve **pas** qu
 5. Réponse `{"ready":true}` : retenter la connexion. Si un `SERVER_ERROR` persiste, consulter Cloudflare → Workers & Pages → votre projet → Logs, puis contrôler les erreurs de déploiement et les liaisons des environnements.
 
 La route `/api/setup-status` ne divulgue aucun utilisateur ni identifiant financier et ne modifie aucune donnée. Ne pas exposer les logs contenant des secrets. Cette correction ne configure pas vos ressources Cloudflare à distance.
+
+
+## Configuration fournie — 16 octobre 2026
+
+Le fichier `wrangler.toml` utilise `mega_bank_db` (D1) et `mega_bank_kv` (KV), avec liaisons `DB` et `CACHE`. La présence des identifiants ne prouve pas que les bindings ont été appliqués dans Cloudflare Pages. Vérifier dans les paramètres du projet, pour chaque environnement.
+
+**Initialisation sur la nouvelle D1 vide uniquement** : `npx wrangler d1 execute mega_bank_db --remote --file=migrations/0001_initial.sql`. Ensuite créer le Super Admin avec `scripts/bootstrap-admin.mjs` suivant les instructions ci-dessus. Ne pas stocker le mot de passe ou le SQL généré dans GitHub. Tester `/api/setup-status` après déploiement.
