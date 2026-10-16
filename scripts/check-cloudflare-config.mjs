@@ -4,8 +4,8 @@ const config = await readFile('wrangler.toml', 'utf8');
 const requiredPatterns = [
   /pages_build_output_dir\s*=\s*"public"/,
   /\[vars\][\s\S]*SUPER_ADMIN_SESSION_VERSION\s*=\s*"[1-9][0-9]*"/,
-  /binding\s*=\s*"DB"[\s\S]*database_name\s*=\s*"oukami_d1"[\s\S]*database_id\s*=\s*"001c173e-694b-434d-a8fc-8c5fa2351438"/,
-  /binding\s*=\s*"KV"[\s\S]*id\s*=\s*"25eac34d165240bfbd8c1bcd14c2954d"/,
+  /binding\s*=\s*"DB"[\s\S]*database_name\s*=\s*"oukami2_d1"[\s\S]*database_id\s*=\s*"e065681b-4cb0-4afa-88d8-3263298492bf"/,
+  /binding\s*=\s*"KV"[\s\S]*id\s*=\s*"9467009dd39643b48a75a71fabcfa218"/,
 ];
 for (const pattern of requiredPatterns) {
   if (!pattern.test(config)) throw new Error(`Configuration Cloudflare incomplète : ${pattern}`);
