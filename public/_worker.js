@@ -16,10 +16,23 @@ async function actor(req,db){const token=cookies(req).mega_session;if(!token||!/
 async function audit(db,u,action,detail){await db.prepare('INSERT INTO audit_logs(id,user_id,institution_id,action,detail) VALUES(?,?,?,?,?)').bind(rand(),u?.id||null,u?.institution_id||null,action,detail||'').run()}
 const id=()=>rand();
 async function route(req,env){const db=env.DB;if(!db)return json({error:'D1_NOT_CONFIGURED'},503);const url=new URL(req.url),p=url.pathname,method=req.method;let body={};if(method==='POST'||method==='PATCH'){if(Number(req.headers.get('content-length')||0)>100000)return json({error:'BODY_TOO_LARGE'},413);try{body=await req.json()}catch{return json({error:'INVALID_JSON'},400)}}
+if(p==='/api/setup-status'&&method==='GET'){
+ const required=['institutions','users','sessions','plans','clients','accounts','transactions','audit_logs'];
+ const found=await db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
+ const names=new Set((found.results||[]).map(x=>x.name));
+ const missing=required.filter(x=>!names.has(x));
+ if(missing.length)return json({ready:false,error:'DATABASE_SCHEMA_MISSING',missing_tables:missing},503);
+ const columns=await db.prepare('PRAGMA table_info(users)').all();
+ const cols=new Set((columns.results||[]).map(x=>x.name));
+ const missingColumns=['password_hash','password_salt','password_iterations','active','role','institution_id'].filter(x=>!cols.has(x));
+ if(missingColumns.length)return json({ready:false,error:'DATABASE_SCHEMA_INCOMPATIBLE',missing_columns:missingColumns},503);
+ const admins=await db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='superadmin' AND active=1").first();
+ return json({ready:!!admins?.n,error:admins?.n?null:'SUPERADMIN_NOT_INITIALIZED'});
+}
 if(p==='/api/login'&&method==='POST'){
  const email=String(body.email||'').trim().toLowerCase(),pw=String(body.password||'');if(!email||pw.length>256)return json({error:'INVALID_CREDENTIALS'},401);
  const ip=(req.headers.get('cf-connecting-ip')||'unknown').slice(0,128);const key='login:'+await hash(ip+'|'+email);let attempts=Number(await env.CACHE?.get(key)||0);if(attempts>=8)return json({error:'TOO_MANY_ATTEMPTS'},429);
- const u=await db.prepare('SELECT * FROM users WHERE email=?').bind(email).first();const valid=u&&u.active&&eq(await pbkdf(pw,u.password_salt,u.password_iterations),u.password_hash);if(!valid){await env.CACHE?.put(key,String(attempts+1),{expirationTtl:900});return json({error:'INVALID_CREDENTIALS'},401)}
+ const u=await db.prepare('SELECT * FROM users WHERE email=?').bind(email).first();const valid=u&&u.active&&typeof u.password_salt==='string'&&/^(?:[0-9a-f]{2})+$/i.test(u.password_salt)&&Number.isInteger(u.password_iterations)&&u.password_iterations>=100000&&typeof u.password_hash==='string'&&eq(await pbkdf(pw,u.password_salt,u.password_iterations),u.password_hash);if(!valid){await env.CACHE?.put(key,String(attempts+1),{expirationTtl:900});return json({error:'INVALID_CREDENTIALS'},401)}
  if(u.institution_id){const inst=await db.prepare('SELECT active FROM institutions WHERE id=?').bind(u.institution_id).first();if(!inst?.active)return json({error:'INSTITUTION_SUSPENDED'},403)}
  await env.CACHE?.delete(key);const token=rand(),csrf=rand();await db.prepare(`INSERT INTO sessions(id_hash,user_id,csrf_hash,expires_at) VALUES(?,?,?,?)`).bind(await hash(token),u.id,await hash(csrf),new Date(Date.now()+28800000).toISOString()).run();await audit(db,u,'LOGIN','');return json({ok:true,csrf,force_password_change:!!u.force_password_change},200,{'set-cookie':cookie(token)});
 }
@@ -62,4 +75,7 @@ if(p==='/api/admin/subscriptions'&&u.role==='superadmin'&&method==='POST'){
  const plan=await db.prepare('SELECT * FROM plans WHERE code=?').bind(body.plan_code).first(),inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(body.institution_id).first();if(!plan||!inst)return json({error:'INVALID_SUBSCRIPTION'},400);let end=new Date(Date.now()+plan.duration_days*86400000).toISOString();await db.prepare('INSERT INTO subscriptions(id,institution_id,plan_code,start_at,end_at,created_by) VALUES(?,?,?,?,?,?)').bind(id(),inst.id,plan.code,new Date().toISOString(),end,u.id).run();await audit(db,u,'SUBSCRIPTION_GRANTED',inst.id+':'+plan.code);return json({ok:true,expires_at:end},201)
 }
 return json({error:'NOT_FOUND'},404)}
-export default {async fetch(req,env){const url=new URL(req.url);if(url.pathname.startsWith('/api/')){if(!allowedOrigin(req))return json({error:'BAD_ORIGIN'},403);try{return await route(req,env)}catch(e){console.error('request failure',e);return json({error:'SERVER_ERROR'},500)}}let response=await env.ASSETS.fetch(req);let h=new Headers(response.headers);h.set('content-security-policy',csp);h.set('x-frame-options','DENY');h.set('referrer-policy','no-referrer');h.set('x-content-type-options','nosniff');return new Response(response.body,{status:response.status,headers:h})}};
+export default {async fetch(req,env){const url=new URL(req.url);if(url.pathname.startsWith('/api/')){if(!allowedOrigin(req))return json({error:'BAD_ORIGIN'},403);try{return await route(req,env)}catch(e){console.error('request failure',e);const msg=String(e?.message||e||'');
+ if(/no such table/i.test(msg))return json({error:'DATABASE_SCHEMA_MISSING',hint:'Appliquer la migration SQL sur la nouvelle base D1, puis initialiser le Super Admin.'},503);
+ if(/no such column|has no column named/i.test(msg))return json({error:'DATABASE_SCHEMA_INCOMPATIBLE',hint:'La base D1 liee ne correspond pas au schema MEGA BANK. Ne pas modifier une base d’un autre projet.'},503);
+ return json({error:'SERVER_ERROR',hint:'Consulter les logs Cloudflare Pages/Workers et verifier DB, CACHE, migration et compte admin.'},500)}}let response=await env.ASSETS.fetch(req);let h=new Headers(response.headers);h.set('content-security-policy',csp);h.set('x-frame-options','DENY');h.set('referrer-policy','no-referrer');h.set('x-content-type-options','nosniff');return new Response(response.body,{status:response.status,headers:h})}};

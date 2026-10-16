@@ -28,3 +28,16 @@ Crédits et échéanciers, pénalités, comptabilité en partie double, gestion 
 
 ## À faire avant usage réel
 Créer des ressources Cloudflare dédiées, activer MFA, permissions métier exhaustives, validations réglementaires, tests de concurrence/idempotence, audit externe sécurité, sauvegardes et stratégie de restauration, protection des données et contrôle financier en partie double.
+
+
+## Diagnostic de connexion (correction SERVER_ERROR)
+
+Le message `SERVER_ERROR` est une réponse générique : il ne prouve **pas** que le mot de passe est faux. Le projet exige un schéma MEGA BANK initialisé et un Super Admin créé dans **la même base D1 que celle reliée au projet Pages**.
+
+1. Créer idéalement une **nouvelle base D1 dédiée** et un **KV dédié**, sans réutiliser une base d'un autre projet, puis adapter leurs identifiants dans `wrangler.toml`.
+2. Dans Cloudflare Pages → Settings → Bindings, lier la nouvelle base sous le nom exact `DB` et le KV sous `CACHE`, pour la production et pour les environnements de prévisualisation concernés. Relancer le déploiement.
+3. Vérifier `https://VOTRE-SITE.pages.dev/api/setup-status`. Réponse `DATABASE_SCHEMA_MISSING` : exécuter le script `migrations/0001_initial.sql` sur **cette nouvelle base** depuis le tableau de bord D1 ou Wrangler : `npx wrangler d1 execute NOM_BASE_DEDIEE --remote --file=migrations/0001_initial.sql`. Ne lancez pas cette commande sur une base existante contenant des données d'un autre logiciel.
+4. Réponse `SUPERADMIN_NOT_INITIALIZED` : générer localement, hors GitHub, un SQL d'initialisation par `node scripts/bootstrap-admin.mjs mega@services.local 'VOTRE_MOT_DE_PASSE_LONG_ET_UNIQUE'`, puis exécuter le SQL sur cette base D1. Le compte affiché sur la capture d'écran ne constitue **pas** automatiquement un compte existant dans D1.
+5. Réponse `{"ready":true}` : retenter la connexion. Si un `SERVER_ERROR` persiste, consulter Cloudflare → Workers & Pages → votre projet → Logs, puis contrôler les erreurs de déploiement et les liaisons des environnements.
+
+La route `/api/setup-status` ne divulgue aucun utilisateur ni identifiant financier et ne modifie aucune donnée. Ne pas exposer les logs contenant des secrets. Cette correction ne configure pas vos ressources Cloudflare à distance.
