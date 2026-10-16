@@ -658,6 +658,7 @@ async function permissionForRequest(path,request){
  const method=request.method.toUpperCase();
  if(path==='/api/logout'||path==='/api/security/log')return null;
  if((path==='/api/me'||path==='/api/load')&&method==='GET')return 'profile.read.own';
+ if(path==='/api/moves/page'&&method==='GET')return 'profile.read.own';
  if(path==='/api/client/media'&&method==='GET')return 'clients.read';
  if(path==='/api/messages'||path.startsWith('/api/messages/'))return 'messages.manage';
  if(path==='/api/admin/verify-password')return 'settings.manage';
@@ -734,22 +735,28 @@ function bankListSelect(){return "SELECT id,name,manager,contact,address,email,l
 async function bankPayload(env,bankId,session={}){
  const bank=await env.DB.prepare('SELECT id,name,manager,contact,address,email,slogan,logo,stamp,signature,primary_color,secondary_color,footer_text,legal_mentions,cga_conditions,currency,country,city,login,status,subscription,subscription_started_at,subscription_expires_at,subscription_updated_at,created_at FROM banks WHERE id=?').bind(bankId).first();
  if(bank)Object.assign(bank,subscriptionInfo(bank));await seedDefaultCharges(env,bankId);await ensureCompanyAccount(env,bankId);
- const clientsQ=await env.DB.prepare("SELECT id,bank_id,name,contact,job,address,piece,client_type,client_details,photo_logo,is_blocked,is_deleted,created_at FROM clients WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all();
+ const [clientsQ,accountsQ,movesQ]=await Promise.all([
+ env.DB.prepare("SELECT id,bank_id,name,contact,job,address,piece,client_type,client_details,photo_logo,is_blocked,is_deleted,created_at FROM clients WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all(),
+ env.DB.prepare("SELECT * FROM accounts WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all(),
+ env.DB.prepare("SELECT m.* FROM moves m JOIN accounts a ON a.id=m.account_id AND a.bank_id=m.bank_id WHERE m.bank_id=? AND COALESCE(m.is_voided,0)=0 ORDER BY m.created_at DESC LIMIT 1500").bind(bankId).all()
+ ]);
  const allClients=(clientsQ.results||[]).map(c=>({...c,photo_logo:isClientMediaRef(c.photo_logo)?clientMediaPublicUrl(c.id):String(c.photo_logo||'')}));
- const accountsQ=await env.DB.prepare("SELECT * FROM accounts WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all();const allAccounts=accountsQ.results||[];
- const movesQ=await env.DB.prepare("SELECT m.* FROM moves m JOIN accounts a ON a.id=m.account_id AND a.bank_id=m.bank_id WHERE m.bank_id=? AND COALESCE(m.is_voided,0)=0 ORDER BY m.created_at DESC LIMIT 1500").bind(bankId).all();const allMoves=movesQ.results||[];
- const voidedQ=await env.DB.prepare("SELECT * FROM moves WHERE bank_id=? AND COALESCE(is_voided,0)=1 ORDER BY voided_at DESC LIMIT 300").bind(bankId).all();
- const usersQ=await env.DB.prepare("SELECT id,bank_id,name,login,role,status,permissions,last_login,is_deleted,created_at FROM users WHERE bank_id=? AND COALESCE(is_deleted,0)=0 ORDER BY created_at DESC").bind(bankId).all();
- const logsQ=await env.DB.prepare('SELECT * FROM logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all();
- const chargeQ=await env.DB.prepare('SELECT * FROM charge_bases WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
- const obligationsQ=await env.DB.prepare('SELECT * FROM obligations WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
- const resetQ=await env.DB.prepare('SELECT * FROM reset_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 100').bind(bankId).all();
- const accountTypesQ=await env.DB.prepare('SELECT * FROM account_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
- const movementTypesQ=await env.DB.prepare('SELECT * FROM movement_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
- const manualQ=await env.DB.prepare('SELECT * FROM manual_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
- const ignoredQ=await env.DB.prepare('SELECT * FROM ignored_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
- const securityQ=await env.DB.prepare('SELECT * FROM security_logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all();
- const requestQ=await env.DB.prepare('SELECT * FROM operation_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all();
+ const allAccounts=accountsQ.results||[];
+ const allMoves=movesQ.results||[];
+ const [voidedQ,usersQ,logsQ,chargeQ,obligationsQ,resetQ,accountTypesQ,movementTypesQ,manualQ,ignoredQ,securityQ,requestQ]=await Promise.all([
+env.DB.prepare("SELECT * FROM moves WHERE bank_id=? AND COALESCE(is_voided,0)=1 ORDER BY voided_at DESC LIMIT 300").bind(bankId).all(),
+env.DB.prepare("SELECT id,bank_id,name,login,role,status,permissions,last_login,is_deleted,created_at FROM users WHERE bank_id=? AND COALESCE(is_deleted,0)=0 ORDER BY created_at DESC").bind(bankId).all(),
+env.DB.prepare('SELECT * FROM logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all(),
+env.DB.prepare('SELECT * FROM charge_bases WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
+env.DB.prepare('SELECT * FROM obligations WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
+env.DB.prepare('SELECT * FROM reset_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 100').bind(bankId).all(),
+env.DB.prepare('SELECT * FROM account_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
+env.DB.prepare('SELECT * FROM movement_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
+env.DB.prepare('SELECT * FROM manual_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
+env.DB.prepare('SELECT * FROM ignored_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all(),
+env.DB.prepare('SELECT * FROM security_logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all(),
+env.DB.prepare('SELECT * FROM operation_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all()
+ ]);
  const management_settings=await managementSettings(env,bankId);const rk=sessionRoleKey(session);const perms=sessionPermissions(session);const uidValue=String(session.userId||'');
  const user={id:uidValue,name:session.userName||bank.manager||'Utilisateur',login:session.userLogin||bank.login||'',role:roleLabel(session.userRole||'Administrateur banque'),role_key:rk,permissions:perms,status:'Actif',last_login:session.lastLogin||'',readonly:rk==='auditeur'};
  const activeClients=allClients.filter(c=>Number(c.is_deleted||0)!==1);const activeAccounts=allAccounts.filter(a=>Number(a.is_deleted||0)!==1&&!norm(a.status).includes('supprim'));
@@ -848,6 +855,28 @@ async function handleApi(request,env,path){
    await requireActiveBankSubscription(env,s.bankId);return json({role:'bank',...(await bankPayload(env,s.bankId,s))});
   }
 
+  if(path==='/api/moves/page'&&request.method==='GET'){
+   if(s.role!=='bank')return json({error:'Accès réservé aux utilisateurs de la banque.'},403);
+   await requireActiveBankSubscription(env,s.bankId);
+   const u=new URL(request.url),limit=Math.min(100,Math.max(10,Number.parseInt(u.searchParams.get('limit')||'25',10)||25));
+   const page=Math.min(100000,Math.max(1,Number.parseInt(u.searchParams.get('page')||'1',10)||1));
+   const accountId=String(u.searchParams.get('account_id')||'').slice(0,128);
+   const q=String(u.searchParams.get('q')||'').trim().slice(0,100);
+   const role=sessionRoleKey(s);
+   let where="m.bank_id=? AND COALESCE(m.is_voided,0)=0";
+   const params=[s.bankId];
+   if(role==='agent_caisse'){where+=' AND m.created_by=? AND COALESCE(a.is_deleted,0)=0';params.push(String(s.userId||''));}
+   if(role==='agent_credit'){where+=" AND (lower(a.type) LIKE '%credit%' OR lower(a.type) LIKE '%crédit%')";}
+   if(role==='auditeur'){where+=" AND COALESCE(a.is_deleted,0)=0";}
+   if(accountId){where+=' AND m.account_id=?';params.push(accountId);}
+   if(q){where+=' AND (m.description LIKE ? OR m.type LIKE ? OR a.number LIKE ? OR c.name LIKE ? OR m.created_at LIKE ?)';params.push(...Array(5).fill('%'+q+'%'));}
+   const from=' FROM moves m JOIN accounts a ON a.id=m.account_id AND a.bank_id=m.bank_id LEFT JOIN clients c ON c.id=a.client_id AND c.bank_id=m.bank_id WHERE '+where;
+   const [countResult,rowsResult]=await Promise.all([
+    env.DB.prepare('SELECT COUNT(*) AS total'+from).bind(...params).first(),
+    env.DB.prepare('SELECT m.*'+from+' ORDER BY m.created_at DESC,m.id DESC LIMIT ? OFFSET ?').bind(...params,limit,(page-1)*limit).all()
+   ]);
+   return json({items:rowsResult.results||[],total:Number(countResult?.total||0),page,limit,pages:Math.ceil(Number(countResult?.total||0)/limit)});
+  }
   if(path==='/api/backup/export'&&request.method==='GET' || path==='/api/backup/import'&&request.method==='POST'){
    if(s.role!=='bank'||sessionRoleKey(s)!=='admin_bank')return json({error:'Réservé à l’administrateur de l’entreprise.'},403);
    await requireActiveBankSubscription(env,s.bankId);
