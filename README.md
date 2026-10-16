@@ -48,3 +48,18 @@ La route `/api/setup-status` ne divulgue aucun utilisateur ni identifiant financ
 Le fichier `wrangler.toml` utilise `mega_bank_db` (D1) et `mega_bank_kv` (KV), avec liaisons `DB` et `CACHE`. La présence des identifiants ne prouve pas que les bindings ont été appliqués dans Cloudflare Pages. Vérifier dans les paramètres du projet, pour chaque environnement.
 
 **Initialisation sur la nouvelle D1 vide uniquement** : `npx wrangler d1 execute mega_bank_db --remote --file=migrations/0001_initial.sql`. Ensuite créer le Super Admin avec `scripts/bootstrap-admin.mjs` suivant les instructions ci-dessus. Ne pas stocker le mot de passe ou le SQL généré dans GitHub. Tester `/api/setup-status` après déploiement.
+
+
+## NOUVEAU : Initialisation guidée du Super Admin MEGA BANK
+
+Compte unique à créer : **mega@services.local**. Le mot de passe est choisi au moment de l'installation ; il ne figure ni dans le ZIP ni sur GitHub.
+
+1. Installer Node.js et décompresser le ZIP. Ouvrir un terminal dans le dossier contenant `wrangler.toml`.
+2. Exécuter `npm install` puis `npx wrangler login` (autoriser votre compte Cloudflare).
+3. Sur la **nouvelle base dédiée uniquement**, lancer `npx wrangler d1 execute mega_bank_db --remote --file=migrations/0001_initial.sql` (à faire une fois, après vérification de la base).
+4. Exécuter **`node scripts/bootstrap-admin.mjs --apply`**. Le programme demande un mot de passe fort deux fois sans l'afficher, puis demande de confirmer le nom de la base D1 `mega_bank_db` avant d'y envoyer un SQL paramétré par l'adresse et le hachage.
+5. Redéployer, ouvrir `/api/setup-status` : la réponse devrait contenir `ready:true`. Connectez-vous avec `mega@services.local` et le mot de passe défini ci-dessus. Un changement de mot de passe est exigé à la première connexion.
+
+**Alternative sans injection directe** : `node scripts/bootstrap-admin.mjs --sql` affiche le SQL pour la console D1 ; conserver cette sortie strictement privée. Si le compte existe déjà, le script ne le remplace pas : utiliser une procédure de réinitialisation autorisée, jamais une suppression arbitraire.
+
+**Sécurité et limites** : ce script nécessite un terminal interactif et une session Cloudflare autorisée ; il n'intègre pas de mot de passe prédéfini. Il ne peut pas initialiser Cloudflare à distance depuis un navigateur. La plateforme reste un socle partiel non homologué pour la banque réelle.
