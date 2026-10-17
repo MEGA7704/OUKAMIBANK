@@ -83,3 +83,12 @@ Le déploiement peut réussir alors que l'initialisation D1 échoue. Ce correcti
 **Instructions :** publier ce nouveau contenu complet à la racine du dépôt GitHub, vérifier dans Cloudflare Pages (Production) les liaisons `DB`/`CACHE` et les secrets `SUPER_ADMIN_EMAIL=mega@services.local`, `SUPER_ADMIN_INITIAL_PASSWORD` de type Secret. Déployer puis ouvrir `https://VOTRE_DOMAINE/api/setup-status`. En cas d'erreur, copier le JSON **sans aucun secret**. En cas de `ready:true`, tester la connexion, changer le mot de passe, supprimer `SUPER_ADMIN_INITIAL_PASSWORD` et redéployer.
 
 **Limitations :** 6 tests locaux, dont un test de l'API de bootstrap avec une base D1 simulée ; aucun test d'intégration n'a été exécuté contre votre D1 distante ni contre l'environnement réel Cloudflare. Si les secrets de votre tableau de bord Cloudflare ne sont pas injectés à l'exécution, la réponse l'indiquera sans planter. N'exécutez pas une migration déjà appliquée et ne supprimez pas la table `users`.
+
+
+## Correction ADMIN_BOOTSTRAP_CRYPTO_ERROR (17 octobre 2026)
+
+Cloudflare Workers limite PBKDF2 via `crypto.subtle.deriveBits()` à 100 000 itérations. La version précédente demandait 310 000 et échouait pendant la création du Super Admin. `public/_worker.js` utilise désormais `pbkdf2Sync` de `node:crypto`, pris en charge par Workers avec `nodejs_compat`, pour conserver 310 000 itérations PBKDF2-SHA256 sans changer le schéma ni invalider les hashes compatibles existants. La configuration `wrangler.toml` active le flag.
+
+Déployer les fichiers modifiés sur GitHub, conserver les bindings `DB` et `CACHE`, ainsi que les secrets `SUPER_ADMIN_EMAIL` et `SUPER_ADMIN_INITIAL_PASSWORD` jusqu'à la création réussie de l'administrateur. Consulter `/api/setup-status`, puis se connecter. Après changement du mot de passe, supprimer `SUPER_ADMIN_INITIAL_PASSWORD` et redéployer. Ne pas relancer la migration si les tables D1 existent déjà.
+
+Cette version n'a pas été testée sur le compte Cloudflare distant et doit être validée en environnement de test avant des opérations financières réelles.

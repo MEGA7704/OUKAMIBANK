@@ -1,8 +1,9 @@
+import { pbkdf2Sync } from 'node:crypto';
 const json=(o,s=200,h={})=>new Response(JSON.stringify(o),{status:s,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff',...h}});
 const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
 const rand=()=>crypto.randomUUID();
 const hash=async s=>hex(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)));
-const pbkdf=async(pass,salt,iter)=>{let key=await crypto.subtle.importKey('raw',new TextEncoder().encode(pass),'PBKDF2',false,['deriveBits']);return hex(await crypto.subtle.deriveBits({name:'PBKDF2',salt:Uint8Array.from(salt.match(/../g).map(x=>parseInt(x,16))),iterations:iter,hash:'SHA-256'},key,256));};
+const pbkdf=async(pass,salt,iter)=>{if(!/^(?:[0-9a-f]{2}){16,}$/i.test(salt)||!Number.isInteger(iter)||iter<100000||iter>1000000)throw Error('INVALID_HASH_PARAMETERS');return pbkdf2Sync(pass,Buffer.from(salt,'hex'),iter,32,'sha256').toString('hex');};
 const eq=(a,b)=>{if(typeof a!=='string'||typeof b!=='string'||a.length!==b.length)return false;let x=0;for(let i=0;i<a.length;i++)x|=a.charCodeAt(i)^b.charCodeAt(i);return x===0};
 const cookie=(value,max=28800)=>`mega_session=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${max}`;
 const cookies=req=>Object.fromEntries((req.headers.get('cookie')||'').split(';').map(x=>x.trim().split('=').slice(0,2)).filter(x=>x.length===2));
