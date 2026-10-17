@@ -92,3 +92,7 @@ Cloudflare Workers limite PBKDF2 via `crypto.subtle.deriveBits()` à 100 000 it�
 Déployer les fichiers modifiés sur GitHub, conserver les bindings `DB` et `CACHE`, ainsi que les secrets `SUPER_ADMIN_EMAIL` et `SUPER_ADMIN_INITIAL_PASSWORD` jusqu'à la création réussie de l'administrateur. Consulter `/api/setup-status`, puis se connecter. Après changement du mot de passe, supprimer `SUPER_ADMIN_INITIAL_PASSWORD` et redéployer. Ne pas relancer la migration si les tables D1 existent déjà.
 
 Cette version n'a pas été testée sur le compte Cloudflare distant et doit être validée en environnement de test avant des opérations financières réelles.
+
+
+## Correctif Cloudflare Workers PBKDF2
+Les nouveaux mots de passe utilisent PBKDF2-SHA256 avec 100 000 itérations, compatible avec `crypto.subtle` en production Cloudflare Workers. L'itération est sauvegardée dans `users.password_iterations` ; les anciennes empreintes ne sont pas réécrites. Ce ZIP ne remplace pas la validation des fonctions bancaires en production.

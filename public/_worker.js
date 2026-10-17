@@ -3,7 +3,17 @@ const json=(o,s=200,h={})=>new Response(JSON.stringify(o),{status:s,headers:{'co
 const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
 const rand=()=>crypto.randomUUID();
 const hash=async s=>hex(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)));
-const pbkdf=async(pass,salt,iter)=>{if(!/^(?:[0-9a-f]{2}){16,}$/i.test(salt)||!Number.isInteger(iter)||iter<100000||iter>1000000)throw Error('INVALID_HASH_PARAMETERS');return pbkdf2Sync(pass,Buffer.from(salt,'hex'),iter,32,'sha256').toString('hex');};
+// WebCrypto on Cloudflare Workers enforces a PBKDF2 iteration ceiling of 100,000.
+// Store the iteration count per user. Older records above that limit can still be
+// verified through node:crypto, but new records use the Workers-compatible value.
+const NEW_PASSWORD_ITERATIONS=100000;
+const pbkdf=async(pass,salt,iter)=>{
+ if(!/^(?:[0-9a-f]{2}){16,}$/i.test(salt)||!Number.isInteger(iter)||iter<100000||iter>1000000)throw Error('INVALID_HASH_PARAMETERS');
+ if(iter>100000)return pbkdf2Sync(pass,Buffer.from(salt,'hex'),iter,32,'sha256').toString('hex');
+ const saltBytes=Uint8Array.from(salt.match(/.{2}/g),v=>parseInt(v,16));
+ const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(pass),{name:'PBKDF2'},false,['deriveBits']);
+ return hex(await crypto.subtle.deriveBits({name:'PBKDF2',salt:saltBytes,iterations:iter,hash:'SHA-256'},key,256));
+};
 const eq=(a,b)=>{if(typeof a!=='string'||typeof b!=='string'||a.length!==b.length)return false;let x=0;for(let i=0;i<a.length;i++)x|=a.charCodeAt(i)^b.charCodeAt(i);return x===0};
 const cookie=(value,max=28800)=>`mega_session=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${max}`;
 const cookies=req=>Object.fromEntries((req.headers.get('cookie')||'').split(';').map(x=>x.trim().split('=').slice(0,2)).filter(x=>x.length===2));
@@ -26,9 +36,9 @@ async function ensureInitialSuperAdmin(db,env){
  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return {state:'INVALID_ADMIN_EMAIL'};
  if(typeof password!=='string'||password.length<12||password.length>256)return {state:'MISSING_OR_INVALID_ADMIN_SECRET'};
  const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
- const ph=await pbkdf(password,salt,310000);
- const result=await db.prepare("INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) SELECT ?,NULL,?,'Super Administrateur','superadmin',?,?,310000,1,1 WHERE NOT EXISTS (SELECT 1 FROM users)")
-  .bind(id(),email,ph,salt).run();
+ const ph=await pbkdf(password,salt,NEW_PASSWORD_ITERATIONS);
+ const result=await db.prepare("INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) SELECT ?,NULL,?,'Super Administrateur','superadmin',?,?,?,1,1 WHERE NOT EXISTS (SELECT 1 FROM users)")
+  .bind(id(),email,ph,salt,NEW_PASSWORD_ITERATIONS).run();
  return {state:result.meta?.changes===1?'ADMIN_CREATED':'ADMIN_NOT_INSERTED'};
 }
 async function adminSetupStatus(db,env){
@@ -68,7 +78,7 @@ if(p==='/api/logout'&&method==='POST'){const token=cookies(req).mega_session;if(
 const u=await actor(req,db);if(!u)return json({error:'UNAUTHORIZED'},401);
 if(method!=='GET'&&method!=='HEAD') {const token=req.headers.get('x-csrf-token');if(!token||!eq(await hash(token),u.csrf_hash))return json({error:'CSRF_INVALID'},403)}
 if(p==='/api/me'&&method==='GET')return json({user:{id:u.id,name:u.display_name,email:u.email,role:u.role,institution_id:u.institution_id},force_password_change:!!u.force_password_change});
-if(p==='/api/password'&&method==='POST') {if(!within(body.current,256)||!within(body.next,256)||body.next.length<12)return json({error:'PASSWORD_REQUIREMENTS'},400);const old=await db.prepare('SELECT password_hash,password_salt,password_iterations FROM users WHERE id=?').bind(u.id).first();if(!eq(await pbkdf(body.current,old.password_salt,old.password_iterations),old.password_hash))return json({error:'BAD_CURRENT_PASSWORD'},403);const salt=hex(crypto.getRandomValues(new Uint8Array(16))),ph=await pbkdf(body.next,salt,310000);await db.batch([db.prepare('UPDATE users SET password_hash=?,password_salt=?,password_iterations=310000,session_version=session_version+1,force_password_change=0 WHERE id=?').bind(ph,salt,u.id),db.prepare('DELETE FROM sessions WHERE user_id=?').bind(u.id)]);await audit(db,u,'PASSWORD_CHANGED','');return json({ok:true},200,{'set-cookie':cookie('',0)})}
+if(p==='/api/password'&&method==='POST') {if(!within(body.current,256)||!within(body.next,256)||body.next.length<12)return json({error:'PASSWORD_REQUIREMENTS'},400);const old=await db.prepare('SELECT password_hash,password_salt,password_iterations FROM users WHERE id=?').bind(u.id).first();if(!eq(await pbkdf(body.current,old.password_salt,old.password_iterations),old.password_hash))return json({error:'BAD_CURRENT_PASSWORD'},403);const salt=hex(crypto.getRandomValues(new Uint8Array(16))),ph=await pbkdf(body.next,salt,NEW_PASSWORD_ITERATIONS);await db.batch([db.prepare('UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,session_version=session_version+1,force_password_change=0 WHERE id=?').bind(ph,salt,NEW_PASSWORD_ITERATIONS,u.id),db.prepare('DELETE FROM sessions WHERE user_id=?').bind(u.id)]);await audit(db,u,'PASSWORD_CHANGED','');return json({ok:true},200,{'set-cookie':cookie('',0)})}
 if(u.force_password_change)return json({error:'CHANGE_PASSWORD_REQUIRED'},403);
 if(p==='/api/dashboard'&&method==='GET'){
  if(u.role==='superadmin'){const x=await db.prepare('SELECT COUNT(*) total FROM institutions').first();return json({institutions:x.total})}
@@ -97,7 +107,7 @@ if(p==='/api/admin/institutions'&&u.role==='superadmin'){
 }
 if(p==='/api/admin/users'&&u.role==='superadmin'&&method==='POST'){
  if(!within(body.email)||!within(body.name)||!within(body.password,256)||body.password.length<12||!['admin','teller','auditor'].includes(body.role))return json({error:'INVALID_USER'},400);
- const inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(body.institution_id).first();if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);let salt=hex(crypto.getRandomValues(new Uint8Array(16))),ph=await pbkdf(body.password,salt,310000);let key=id();await db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt) VALUES(?,?,?,?,?,?,?)').bind(key,inst.id,body.email.trim().toLowerCase(),body.name.trim(),body.role,ph,salt).run();await audit(db,u,'USER_CREATED',key);return json({ok:true,id:key},201)
+ const inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(body.institution_id).first();if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);let salt=hex(crypto.getRandomValues(new Uint8Array(16))),ph=await pbkdf(body.password,salt,NEW_PASSWORD_ITERATIONS);let key=id();await db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations) VALUES(?,?,?,?,?,?,?,?)').bind(key,inst.id,body.email.trim().toLowerCase(),body.name.trim(),body.role,ph,salt,NEW_PASSWORD_ITERATIONS).run();await audit(db,u,'USER_CREATED',key);return json({ok:true,id:key},201)
 }
 if(p==='/api/admin/subscriptions'&&u.role==='superadmin'&&method==='POST'){
  const plan=await db.prepare('SELECT * FROM plans WHERE code=?').bind(body.plan_code).first(),inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(body.institution_id).first();if(!plan||!inst)return json({error:'INVALID_SUBSCRIPTION'},400);let end=new Date(Date.now()+plan.duration_days*86400000).toISOString();await db.prepare('INSERT INTO subscriptions(id,institution_id,plan_code,start_at,end_at,created_by) VALUES(?,?,?,?,?,?)').bind(id(),inst.id,plan.code,new Date().toISOString(),end,u.id).run();await audit(db,u,'SUBSCRIPTION_GRANTED',inst.id+':'+plan.code);return json({ok:true,expires_at:end},201)
