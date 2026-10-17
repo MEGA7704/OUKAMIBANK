@@ -124,3 +124,14 @@ Cette opération ne modifie pas les tables financières, les comptes clients ni 
 ## Correction INVALID_CREDENTIALS après deux changements (2026-10-17)
 
 Le flux de récupération met maintenant `force_password_change=0`. Après une récupération réussie, **le mot de passe choisi dans recovery.html est directement le mot de passe de connexion**. L’ancien mot de passe ne fonctionne plus. Si le jeton de récupération précédent a déjà été utilisé, en créer un nouveau et le remplacer dans le secret Cloudflare `SUPER_ADMIN_RECOVERY_TOKEN`, puis redéployer ; le même jeton ne peut servir une deuxième fois. Attendre la fin du verrouillage temporaire (15 minutes sans nouvelle tentative) avant d’essayer de se reconnecter. Ne jamais transmettre ces secrets à un tiers. En production, retirer le jeton temporaire après succès et redéployer.
+
+
+## Livraison du correctif « 3 profils » — périmètre réellement couvert
+
+- Le formulaire distingue Administrateur, Agent et Client. Le choix Client est affiché **mais désactivé** tant que l'identification et le rattachement sûr des clients à leurs comptes ne sont pas développés. Ne pas l'activer seulement avec du JavaScript.
+- Une vérification serveur refuse un accès au mauvais profil (`ACCESS_PROFILE_MISMATCH`). Les utilisateurs superadmin/admin utilisent Administrateur; teller/auditor utilisent Agent.
+- Les champs de mot de passe de la page de connexion, de Mon compte et du formulaire de création des utilisateurs disposent d'un bouton Afficher/Masquer.
+- Le Super Admin reste limité à son espace de pilotage. Les pages Rapports et Paramètres sont indiquées **non opérationnelles** et n'ont pas de fausses API.
+- Ce correctif ne développe **pas** les crédits, obligations, comptabilité, client read-only, permission granulaire, rapports complets ou import/export demandés dans le nouveau cahier des charges.
+- La base D1 existante n'est pas migrée ni effacée dans ce correctif.
+- Les tests inclus restent des tests locaux; validation Cloudflare et vérifications de sécurité complémentaires requises avant usage réel.

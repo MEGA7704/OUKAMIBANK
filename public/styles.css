@@ -3,3 +3,5 @@
 /* Explicit hidden beats display:grid/flex layout rules, including .auth. */
 [hidden], .auth[hidden], #app[hidden], #newBtn[hidden], nav a[hidden] {display:none !important;}
 .password-required-notice{padding:13px 17px;background:#fff4d5;border:1px solid #dfc88c;border-radius:10px;margin:12px 0;color:#5a4514}
+
+.access-choice{border:1px solid #cbdccd;border-radius:11px;margin:16px 0;padding:10px;display:flex;flex-wrap:wrap;gap:8px}.access-choice legend{font-weight:700}.access-choice label{margin:3px 5px;display:flex;align-items:center;gap:5px;font-weight:500}.access-choice input{width:auto;margin:0}.password-wrap{display:flex;position:relative}.password-wrap input{padding-right:83px}.toggle-password{position:absolute;right:5px;top:13px;background:#edf4ee;color:#214d36;padding:6px;border-radius:6px;font-size:12px}.auth .access-choice label{font-size:13px}.note{border-left:3px solid #b18e47;padding:12px;background:#fff9ec;margin:12px 0}
