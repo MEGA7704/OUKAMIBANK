@@ -152,17 +152,49 @@ if(p==='/api/admin/institutions-with-admin'&&method==='POST'){
  const existing=await db.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
  if(existing)return json({error:'EMAIL_ALREADY_USED'},409);
  const institutionId=id(),adminId=id();
- const temporaryPassword=hex(crypto.getRandomValues(new Uint8Array(24)));
+ const temporaryPassword=String(body.admin_password||'');
+ if(temporaryPassword.length<12||temporaryPassword.length>256)return json({error:'PASSWORD_REQUIREMENTS'},400);
  const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
  const digest=await pbkdf(temporaryPassword,salt,NEW_PASSWORD_ITERATIONS);
  try{
   await db.batch([
    db.prepare('INSERT INTO institutions(id,name) VALUES(?,?)').bind(institutionId,institutionName),
-   db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) VALUES(?,?,?,?,?,?,?,?,1,1)').bind(adminId,institutionId,email,adminName,'admin',digest,salt,NEW_PASSWORD_ITERATIONS)
+   db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) VALUES(?,?,?,?,?,?,?,?,1,0)').bind(adminId,institutionId,email,adminName,'admin',digest,salt,NEW_PASSWORD_ITERATIONS)
   ]);
  }catch(err){if(/UNIQUE|constraint/i.test(String(err)))return json({error:'EMAIL_ALREADY_USED_OR_COMPANY_CONFLICT'},409);throw err}
  try{await audit(db,u,'INSTITUTION_AND_ADMIN_CREATED',institutionId)}catch(err){console.error('COMPANY_ADMIN_AUDIT_FAILED')}
- return json({ok:true,institution_id:institutionId,admin_id:adminId,admin_email:email,temporary_password:temporaryPassword,force_password_change:true},201,{'cache-control':'no-store'});
+ return json({ok:true,institution_id:institutionId,admin_id:adminId,admin_email:email,force_password_change:false},201,{'cache-control':'no-store'});
+}
+// Only the Super Admin may edit an institution or permanently delete an empty one.
+// Refuse destructive deletion if any financial/operational records exist.
+if(u.role==='superadmin'&&p==='/api/admin/institutions/edit'&&method==='POST'){
+ const institutionId=String(body.institution_id||'');const name=String(body.name||'').trim();
+ if(!within(institutionId,100)||!within(name,160))return json({error:'INVALID_INSTITUTION'},400);
+ const inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(institutionId).first();
+ if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);
+ await db.prepare('UPDATE institutions SET name=? WHERE id=?').bind(name,institutionId).run();
+ await audit(db,u,'INSTITUTION_RENAMED',institutionId);return json({ok:true});
+}
+if(u.role==='superadmin'&&p==='/api/admin/institutions/delete'&&method==='POST'){
+ const institutionId=String(body.institution_id||'');
+ if(!within(institutionId,100)||body.confirm!== 'SUPPRIMER')return json({error:'DELETION_CONFIRMATION_REQUIRED'},400);
+ const inst=await db.prepare('SELECT id,name FROM institutions WHERE id=?').bind(institutionId).first();
+ if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);
+ const [clients,accounts,transactions,messages]=await db.batch([
+  db.prepare('SELECT COUNT(*) n FROM clients WHERE institution_id=?').bind(institutionId),
+  db.prepare('SELECT COUNT(*) n FROM accounts WHERE institution_id=?').bind(institutionId),
+  db.prepare('SELECT COUNT(*) n FROM transactions WHERE institution_id=?').bind(institutionId),
+  db.prepare('SELECT COUNT(*) n FROM support_messages WHERE institution_id=?').bind(institutionId)
+ ]);
+ if([clients,accounts,transactions,messages].some(r=>Number(r.results[0].n)>0))return json({error:'INSTITUTION_HAS_DATA',hint:'Désactivez cette entreprise. La suppression définitive est interdite tant que des données bancaires existent.'},409);
+ // Do not remove audit history; retain immutable records without sensitive details.
+ await db.batch([
+  db.prepare('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE institution_id=?)').bind(institutionId),
+  db.prepare('DELETE FROM subscriptions WHERE institution_id=?').bind(institutionId),
+  db.prepare('DELETE FROM users WHERE institution_id=?').bind(institutionId),
+  db.prepare('DELETE FROM institutions WHERE id=?').bind(institutionId)
+ ]);
+ await audit(db,u,'EMPTY_INSTITUTION_DELETED',institutionId);return json({ok:true});
 }
 // Super Admin read-only views and authorized institution status change.
 if(u.role==='superadmin'&&p==='/api/admin/members'&&method==='GET'){const r=await db.prepare('SELECT u.id,u.email,u.display_name,u.role,u.active,i.name institution_name FROM users u LEFT JOIN institutions i ON i.id=u.institution_id ORDER BY u.created_at DESC LIMIT 200').all();return json({items:r.results})}

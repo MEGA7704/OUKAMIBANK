@@ -155,3 +155,11 @@ Menus : Tableau de bord, Entreprises, Membres, Abonnements, Mots de passe, Journ
 - Journal : 100 dernières actions auditées.
 
 Aucune table D1 nouvelle, aucun script de migration supplémentaire. Déployer les fichiers avec les liaisons DB et CACHE existantes. Tester d'abord sur un environnement de préproduction. Les autres fonctionnalités du cahier des charges non encore développées ne sont pas implicitement prises en charge.
+
+## Mise à jour : gestion des entreprises
+
+Dans Super Admin → Entreprises → Nouvelle entreprise, saisir le nom de l'institution, le nom et l'e-mail de son administrateur, ainsi que **son mot de passe initial (12 caractères minimum)**. Le mot de passe est haché côté serveur et n'est ni inclus dans les réponses API ni enregistré en clair. L'administrateur peut l'utiliser durablement et le changer volontairement dans « Mon compte ».
+
+Les actions Modifier et Supprimer sont réservées au Super Admin. La suppression définitive concerne uniquement une entreprise sans clients, comptes, mouvements ni messages d'assistance. Si des données existent, utiliser Désactiver : aucune donnée bancaire n'est supprimée. Une confirmation saisie est exigée avant suppression. Une suppression d'entreprise vide retire ses administrateurs, leurs sessions et les abonnements associés, et conserve les traces d'audit.
+
+**Aucune migration D1 requise.** Vérifier d'abord les sauvegardes avant de déployer toute fonction de suppression. Les tests locaux ne prouvent pas la conformité de l'application pour une utilisation bancaire en production.
