@@ -105,8 +105,8 @@ Ne supprimez pas le compte existant. Si `/api/setup-status` affiche `admin_exist
 1. Dans **Cloudflare Pages > Paramètres > Variables et secrets (Production)**, ajoutez un **nouveau secret** `SUPER_ADMIN_RECOVERY_TOKEN`, de **32 caractères aléatoires minimum**, différent du mot de passe de connexion et de `SUPER_ADMIN_INITIAL_PASSWORD`. Exemple de génération sûre : gestionnaire de mots de passe avec génération aléatoire. Ne publiez pas ce jeton dans GitHub ni dans une conversation.
 2. Publiez la version de ce ZIP par GitHub et assurez-vous que le secret est disponible en production.
 3. Ouvrez `https://VOTRE-SITE.pages.dev/recovery.html`, saisissez le jeton et un **nouveau mot de passe personnel** de 12 caractères minimum puis confirmez. Le navigateur transmet le jeton uniquement via un en-tête HTTPS, jamais dans une URL.
-4. La réponse `PASSWORD_RESET_SUCCESS` confirme la mise à jour. Le nouveau mot de passe est haché PBKDF2-SHA256 (100 000 itérations et sel aléatoire) avant insertion dans D1. Les sessions existantes sont supprimées et un changement de mot de passe après connexion est demandé. La réutilisation du même jeton renvoie `RECOVERY_TOKEN_ALREADY_USED`.
-5. **Supprimez immédiatement `SUPER_ADMIN_RECOVERY_TOKEN` de Cloudflare et redéployez**, puis connectez-vous à `mega@services.local` avec le nouveau mot de passe. Changez à nouveau le mot de passe à la demande de l'application. Supprimez aussi `SUPER_ADMIN_INITIAL_PASSWORD` après confirmation d'accès.
+4. La réponse `PASSWORD_RESET_SUCCESS` confirme la mise à jour. Le nouveau mot de passe est haché PBKDF2-SHA256 (100 000 itérations et sel aléatoire) avant insertion dans D1. Les sessions existantes sont supprimées et aucun second changement du mot de passe n’est exigé après une récupération réussie. La réutilisation du même jeton renvoie `RECOVERY_TOKEN_ALREADY_USED`.
+5. **Supprimez immédiatement `SUPER_ADMIN_RECOVERY_TOKEN` de Cloudflare et redéployez**, puis connectez-vous à `mega@services.local` avec le nouveau mot de passe. Aucun deuxième changement n’est nécessaire. Supprimez aussi `SUPER_ADMIN_INITIAL_PASSWORD` après confirmation d'accès.
 
 Cette opération ne modifie pas les tables financières, les comptes clients ni les transactions. Elle s'appuie sur la table `audit_logs` existante : aucune migration SQL supplémentaire. Le jeton est marqué utilisé par une clé unique et une transaction D1 atomique. L'API refuse les récupérations si le secret n'est pas configuré, si le compte est absent ou inactif, ou si le jeton est déjà utilisé. Utilisez un jeton suffisamment aléatoire et supprimez-le immédiatement après l'opération.
 
@@ -119,3 +119,8 @@ Cette opération ne modifie pas les tables financières, les comptes clients ni 
 - Le formulaire utilise le mot de passe actuel (celui saisi lors de la dernière connexion), puis demande un nouveau mot de passe de 12 caractères minimum.
 - La modification invalide les sessions, impose une nouvelle connexion et débloque les pages après authentification.
 - Les listes Clients/Comptes/Mouvements sont réservées aux comptes rattachés à une institution; le Super Admin est administrateur de la plateforme, pas gestionnaire direct de ces comptes.
+
+
+## Correction INVALID_CREDENTIALS après deux changements (2026-10-17)
+
+Le flux de récupération met maintenant `force_password_change=0`. Après une récupération réussie, **le mot de passe choisi dans recovery.html est directement le mot de passe de connexion**. L’ancien mot de passe ne fonctionne plus. Si le jeton de récupération précédent a déjà été utilisé, en créer un nouveau et le remplacer dans le secret Cloudflare `SUPER_ADMIN_RECOVERY_TOKEN`, puis redéployer ; le même jeton ne peut servir une deuxième fois. Attendre la fin du verrouillage temporaire (15 minutes sans nouvelle tentative) avant d’essayer de se reconnecter. Ne jamais transmettre ces secrets à un tiers. En production, retirer le jeton temporaire après succès et redéployer.

@@ -90,7 +90,7 @@ if(p==='/api/admin/recover'&&method==='POST'){
   // D1 batch is transactional; duplicate marker => all statements rolled back.
   await db.batch([
    db.prepare("INSERT INTO audit_logs(id,user_id,institution_id,action,detail) VALUES(?,?,NULL,'SUPERADMIN_PASSWORD_RECOVERED','one-time recovery')").bind(marker,admin.id),
-   db.prepare("UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,force_password_change=1,session_version=session_version+1 WHERE id=? AND role='superadmin' AND active=1").bind(digest,salt,NEW_PASSWORD_ITERATIONS,admin.id),
+   db.prepare("UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,force_password_change=0,session_version=session_version+1 WHERE id=? AND role='superadmin' AND active=1").bind(digest,salt,NEW_PASSWORD_ITERATIONS,admin.id),
    db.prepare('DELETE FROM sessions WHERE user_id=?').bind(admin.id)
   ]);
  }catch(e){

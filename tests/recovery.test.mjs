@@ -10,7 +10,7 @@ function fakeDB(){
   if(state.markers.has(marker))throw Error('UNIQUE constraint failed: audit_logs.id');
   state.markers.add(marker);
   const fields=statements[1].args;
-  state.user.digest=fields[0];state.user.salt=fields[1];state.user.iterations=fields[2];state.sessions=0;
+  state.user.digest=fields[0];state.user.salt=fields[1];state.user.iterations=fields[2];state.user.force_password_change=0;state.sessions=0;
   return [{meta:{changes:1}},{meta:{changes:1}},{meta:{changes:2}}];
  }};
 }
@@ -24,7 +24,7 @@ test('recovery changes only admin hash, clears sessions, and is single use',asyn
  const env={DB,CACHE,SUPER_ADMIN_RECOVERY_TOKEN:token,SUPER_ADMIN_EMAIL:'mega@services.local'};
  const reply=await worker.fetch(request(),env);assert.equal(reply.status,200);assert.equal((await reply.json()).code,'PASSWORD_RESET_SUCCESS');
  const a=DB.state.user;
- assert.equal(a.iterations,100000);assert.equal(DB.state.sessions,0);
+ assert.equal(a.iterations,100000);assert.equal(a.force_password_change,0);assert.equal(DB.state.sessions,0);
  assert.equal(a.digest,pbkdf2Sync('NewPasswordForTestingOnly!',Buffer.from(a.salt,'hex'),100000,32,'sha256').toString('hex'));
  const again=await worker.fetch(request(),env);assert.equal(again.status,409);
  assert.equal((await again.json()).error,'RECOVERY_TOKEN_ALREADY_USED');
