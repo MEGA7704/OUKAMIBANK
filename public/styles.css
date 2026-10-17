@@ -108,3 +108,12 @@
 }
 
 #modal.client-registration-modal{width:min(1200px,calc(100vw - 32px));max-width:calc(100vw - 32px)}.client-row-actions{display:flex;gap:5px;flex-wrap:wrap}.client-row-actions button{font-size:12px;padding:7px 9px}.client-row-actions button:last-child{background:#a3333b}.client-row-actions button:nth-child(2){background:#b78e45}#modal.client-registration-modal .client-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}#modal.client-registration-modal textarea{width:100%;max-width:100%}@media(max-width:900px){#modal.client-registration-modal .client-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:600px){#modal.client-registration-modal .client-fields{grid-template-columns:1fr}}
+
+/* Tables lisibles et actions centrées */
+.tablebox table{width:100%;border-collapse:collapse;table-layout:auto}
+.tablebox th,.tablebox td{vertical-align:middle;text-align:left;padding:12px 10px}
+.tablebox th:last-child,.tablebox td:last-child{text-align:center;min-width:170px}
+.row-actions,.client-row-actions{display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap}
+.row-actions button{font-size:12px;padding:7px 10px;white-space:nowrap}
+.row-actions .danger-action{background:#a3333b;color:#fff}
+@media(max-width:700px){.tablebox{overflow-x:auto}.tablebox th,.tablebox td{padding:8px 5px;font-size:12px}}

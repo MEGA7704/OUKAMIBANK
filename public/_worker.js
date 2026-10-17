@@ -153,6 +153,7 @@ if(p==='/api/clients'&&method==='POST'){
  await db.prepare('INSERT INTO clients(id,institution_id,number,kind,name,phone,details_json) VALUES(?,?,?,?,?,?,?)').bind(key,u.institution_id,no,body.kind,name,phone,JSON.stringify(details)).run();
  await audit(db,u,'CLIENT_CREATED',key);return json({ok:true,id:key,number:no},201)
 }
+function nameForClient(d,kind){return kind==='PERSON'?String(d.last_name||'').trim():String(d.company_name||'').trim()}
 if(p.startsWith('/api/clients/') && ['GET','PUT','DELETE'].includes(method)){
  const clientId=decodeURIComponent(p.slice('/api/clients/'.length));
  if(!clientId||clientId.includes('/'))return json({error:'INVALID_CLIENT_ID'},400);
@@ -179,8 +180,11 @@ if(p.startsWith('/api/clients/') && ['GET','PUT','DELETE'].includes(method)){
   const current=JSON.parse(client.details_json||'{}');const keys=client.kind==='PERSON'?['last_name','first_name','birth_date','birth_place','sex','profession','identity_type','identity_number','phone','whatsapp','commune','neighborhood','emergency_name','emergency_phone','emergency_relation']:['company_name','acronym','legal_form','activity','registration','tax_number','creation_date','city','company_commune','company_neighborhood','headquarters','company_phone','company_whatsapp','company_email','representative_last','representative_first','representative_role','representative_phone','representative_id_type','representative_id_number'];
   const next={...current};for(const key of keys){if(body[key]!==undefined){if(typeof body[key]!=='string'||body[key].length>180)return json({error:'INVALID_CLIENT_FIELDS'},400);next[key]=body[key].trim()}}
   const mandatory=client.kind==='PERSON'?['last_name','first_name','birth_date','birth_place','sex','identity_type','identity_number','phone','commune','neighborhood','emergency_name','emergency_phone','emergency_relation']:['company_name','legal_form','company_phone','representative_last','representative_phone','representative_id_type','representative_id_number'];
-  if(mandatory.some(k=>!next[k]))return json({error:'INVALID_CLIENT_FIELDS'},400);
-  const name=client.kind==='PERSON'?`${next.last_name} ${next.first_name}`:next.company_name;
+  // Legacy clients can have only name/phone; editing must not demand fields never collected.
+  const legacy=!Object.keys(current).length || !current[mandatory[1]];
+  if(!legacy && mandatory.some(k=>!next[k]))return json({error:'INVALID_CLIENT_FIELDS',missing:mandatory.filter(k=>!next[k])},400);
+  if(!nameForClient(next,client.kind))return json({error:'INVALID_CLIENT_FIELDS'},400);
+  const name=client.kind==='PERSON'?`${next.last_name||''} ${next.first_name||''}`.trim():next.company_name;
   const phone=client.kind==='PERSON'?next.phone:next.company_phone;
   await db.prepare('UPDATE clients SET name=?,phone=?,details_json=? WHERE id=? AND institution_id=?').bind(name,phone,JSON.stringify(next),clientId,u.institution_id).run();
   await audit(db,u,'CLIENT_UPDATED',clientId);return json({ok:true});
@@ -189,6 +193,47 @@ if(p.startsWith('/api/clients/') && ['GET','PUT','DELETE'].includes(method)){
 }
 if(p==='/api/accounts'&&method==='GET'){if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);const page=Math.min(100,Math.max(1,Number(url.searchParams.get('page')||1)));const rows=await db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,c.name client FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.institution_id=? ORDER BY a.created_at DESC,a.id DESC LIMIT 21 OFFSET ?').bind(u.institution_id,(page-1)*20).all();return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page})}
 if(p==='/api/accounts'&&method==='POST'){if(u.role!=='admin')return json({error:'FORBIDDEN'},403);if(!['CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION'].includes(body.kind))return json({error:'INVALID_ACCOUNT_TYPE'},400);const client=await db.prepare('SELECT id FROM clients WHERE id=? AND institution_id=? AND active=1').bind(body.client_id,u.institution_id).first();if(!client)return json({error:'CLIENT_NOT_FOUND'},404);const key=id(),no='MB-'+key.slice(0,12).toUpperCase();await db.prepare('INSERT INTO accounts(id,institution_id,client_id,number,kind) VALUES(?,?,?,?,?)').bind(key,u.institution_id,body.client_id,no,body.kind).run();await audit(db,u,'ACCOUNT_CREATED',key);return json({ok:true,id:key,number:no},201)}
+if(p.startsWith('/api/accounts/') && ['GET','DELETE'].includes(method)){
+ const accountId=decodeURIComponent(p.slice('/api/accounts/'.length));
+ const a=await db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,c.name client FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.id=? AND a.institution_id=?').bind(accountId,u.institution_id).first();
+ if(!a)return json({error:'ACCOUNT_NOT_FOUND'},404);
+ if(method==='GET'){
+  const t=await db.prepare('SELECT reference,kind,amount,delta,description,created_at FROM transactions WHERE account_id=? AND institution_id=? ORDER BY created_at DESC,id DESC LIMIT 200').bind(accountId,u.institution_id).all();
+  return json({account:a,transactions:t.results});
+ }
+ if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+ const linked=await db.prepare('SELECT COUNT(*) n FROM transactions WHERE account_id=? AND institution_id=?').bind(accountId,u.institution_id).first();
+ if(linked.n>0||a.balance!==0)return json({error:'ACCOUNT_HAS_FINANCIAL_HISTORY',hint:'Un compte mouvementé ne peut être supprimé : clôturez-le selon la procédure réglementaire.'},409);
+ await db.prepare('DELETE FROM accounts WHERE id=? AND institution_id=? AND NOT EXISTS (SELECT 1 FROM transactions WHERE account_id=?) AND balance=0').bind(accountId,u.institution_id,accountId).run();
+ await audit(db,u,'ACCOUNT_DELETED',accountId);return json({ok:true});
+}
+if(p.startsWith('/api/transactions/') && ['GET','PUT','DELETE'].includes(method)){
+ const txId=decodeURIComponent(p.slice('/api/transactions/'.length));
+ const tx=await db.prepare('SELECT t.*,a.number account FROM transactions t JOIN accounts a ON a.id=t.account_id WHERE t.id=? AND t.institution_id=?').bind(txId,u.institution_id).first();
+ if(!tx)return json({error:'TRANSACTION_NOT_FOUND'},404);
+ if(method==='GET')return json({transaction:tx});
+ if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+ if(method==='PUT'){
+  // Immutable financial ledger: corrections to amount, dates and accounts are prohibited.
+  // Notes are stored in an append-only audit rather than changing the signed movement.
+  if(!within(body.reason,400))return json({error:'CORRECTION_REASON_REQUIRED'},400);
+  await audit(db,u,'TRANSACTION_CORRECTION_NOTE',tx.reference+' : '+body.reason.trim());
+  return json({ok:true,message:'Note de correction ajoutée au journal. Le mouvement initial reste inchangé.'});
+ }
+ // A posted movement cannot be deleted. Record a motivated reversal in a separate operation.
+ if(!within(body.reason,400))return json({error:'REVERSAL_REASON_REQUIRED'},400);
+ if(tx.operation_key.startsWith('REV-'))return json({error:'REVERSAL_NOT_REVERSIBLE'},409);
+ const original=await db.prepare('SELECT id,account_id,amount,delta,kind,leg FROM transactions WHERE institution_id=? AND operation_key=? ORDER BY leg').bind(u.institution_id,tx.operation_key).all();
+ const reversalKey='REV-'+tx.operation_key;
+ if(await db.prepare('SELECT id FROM transactions WHERE institution_id=? AND operation_key=?').bind(u.institution_id,reversalKey).first())return json({error:'ALREADY_REVERSED'},409);
+ const reverseKind={DEPOSIT:'WITHDRAWAL',WITHDRAWAL:'DEPOSIT',TRANSFER_IN:'TRANSFER_OUT',TRANSFER_OUT:'TRANSFER_IN'};
+ const ref='RV-'+id().slice(0,12).toUpperCase();
+ const desc='Contrepassation '+tx.reference+' : '+body.reason.trim();
+ // Insert credits before debits to accommodate transfer reversals, D1 batch is atomic.
+ const stmts=[...original.results].sort((a,b)=>a.delta-b.delta).map((t,i)=>db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(id(),u.institution_id,reversalKey,i+1,t.account_id,reverseKind[t.kind],t.amount,-t.delta,ref,desc,u.id));
+ try{await db.batch(stmts)}catch(e){return json({error:'REVERSAL_REJECTED',hint:'Contrepassation impossible (solde insuffisant, compte ou client bloqué). Aucun mouvement partiel enregistré.'},409)}
+ await audit(db,u,'TRANSACTION_REVERSED',tx.reference+' => '+ref);return json({ok:true,reference:ref});
+}
 if(p==='/api/transactions'&&method==='GET'){if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);const page=Math.min(1000,Math.max(1,Number(url.searchParams.get('page')||1)));const rows=await db.prepare('SELECT t.id,t.reference,t.kind,t.amount,t.delta,t.created_at,a.number account FROM transactions t JOIN accounts a ON a.id=t.account_id WHERE t.institution_id=? ORDER BY t.created_at DESC,t.id DESC LIMIT 21 OFFSET ?').bind(u.institution_id,(page-1)*20).all();return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page})}
 if(p==='/api/transactions'&&method==='POST'){
  if(!writable(u,'transactions'))return json({error:'FORBIDDEN'},403);if(!['DEPOSIT','WITHDRAWAL','TRANSFER'].includes(body.kind)||!money(body.amount)||!within(body.operation_key,100))return json({error:'INVALID_TRANSACTION'},400);
