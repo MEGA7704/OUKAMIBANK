@@ -123,3 +123,23 @@
 .row-actions button{font-size:12px;padding:7px 10px;white-space:nowrap}
 .row-actions .danger-action{background:#a3333b;color:#fff}
 @media(max-width:700px){.tablebox{overflow-x:auto}.tablebox th,.tablebox td{padding:8px 5px;font-size:12px}}
+
+
+/* Ajustement final page de connexion : tout centré sauf les champs */
+.auth .login{display:flex;flex-direction:column;align-items:center;text-align:center}
+.auth .auth-head,.auth #loginForm,.auth .small,.auth .error{width:100%}
+.auth .auth-head,.auth .brand,.auth .sub,.auth .login-badge{text-align:center;justify-content:center}
+.auth #loginForm{display:flex;flex-direction:column;align-items:stretch}
+.auth #loginForm label{ text-align:left }
+.auth #loginForm .password-wrap{ text-align:left }
+.auth .access-choice{display:block;text-align:center;overflow-x:auto;overflow-y:hidden;white-space:nowrap}
+.auth .access-choice legend{margin:0 auto 10px}
+.auth .access-options{display:flex;flex-wrap:nowrap;justify-content:center;align-items:stretch;gap:10px;min-width:max-content}
+.auth .access-options label{flex:0 0 auto;min-width:145px;white-space:nowrap}
+.auth .access-options label span{display:inline-flex;flex-direction:row;align-items:center;gap:4px;white-space:nowrap}
+.auth .disabled-option small{display:inline}
+@media(max-width:560px){
+  .auth .access-choice{padding-bottom:8px}
+  .auth .access-options{justify-content:flex-start}
+  .auth .access-options label{min-width:140px;padding:10px}
+}
