@@ -140,6 +140,28 @@ if(p==='/api/admin/institutions'&&u.role==='superadmin'){
  if(method==='GET'){const r=await db.prepare('SELECT id,name,active,created_at FROM institutions ORDER BY created_at DESC LIMIT 100').all();return json({items:r.results})}
  if(method==='POST'){if(!within(body.name))return json({error:'INVALID_NAME'},400);const key=id();await db.prepare('INSERT INTO institutions(id,name) VALUES(?,?)').bind(key,body.name.trim()).run();await audit(db,u,'INSTITUTION_CREATED',key);return json({ok:true,id:key},201)}
 }
+// A bank administrator is created only by the Super Admin. The password is generated
+// with a cryptographic RNG, shown once in the response and never written to audit logs.
+if(p==='/api/admin/bank-admins'&&u.role==='superadmin'&&method==='POST'){
+ const email=String(body.email||'').trim().toLowerCase();
+ const name=String(body.name||'').trim();
+ if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>160||!within(name,160))return json({error:'INVALID_ADMIN_DETAILS'},400);
+ const inst=await db.prepare('SELECT id FROM institutions WHERE id=? AND active=1').bind(body.institution_id).first();
+ if(!inst)return json({error:'INSTITUTION_NOT_FOUND_OR_INACTIVE'},404);
+ const exists=await db.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
+ if(exists)return json({error:'EMAIL_ALREADY_USED'},409);
+ // Random 24-byte secret: URL-safe characters; no predictable or reusable password.
+ const initialPassword=hex(crypto.getRandomValues(new Uint8Array(24)));
+ const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
+ const digest=await pbkdf(initialPassword,salt,NEW_PASSWORD_ITERATIONS);
+ const uid=id();
+ try{
+  await db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) VALUES(?,?,?,?,?,?,?,?,1,1)').bind(uid,inst.id,email,name,'admin',digest,salt,NEW_PASSWORD_ITERATIONS).run();
+ }catch(e){if(/UNIQUE|constraint/i.test(String(e)))return json({error:'EMAIL_ALREADY_USED'},409);throw e}
+ // Non-secret log, without persisting the temporary password.
+ try{await audit(db,u,'BANK_ADMIN_CREATED',uid)}catch(err){console.error('BANK_ADMIN_AUDIT_FAILED',err)}
+ return json({ok:true,id:uid,email,temporary_password:initialPassword,force_password_change:true},201);
+}
 if(p==='/api/admin/users'&&u.role==='superadmin'&&method==='POST'){
  if(!within(body.email)||!within(body.name)||!within(body.password,256)||body.password.length<12||!['admin','teller','auditor'].includes(body.role))return json({error:'INVALID_USER'},400);
  const inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(body.institution_id).first();if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);let salt=hex(crypto.getRandomValues(new Uint8Array(16))),ph=await pbkdf(body.password,salt,NEW_PASSWORD_ITERATIONS);let key=id();await db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations) VALUES(?,?,?,?,?,?,?,?)').bind(key,inst.id,body.email.trim().toLowerCase(),body.name.trim(),body.role,ph,salt,NEW_PASSWORD_ITERATIONS).run();await audit(db,u,'USER_CREATED',key);return json({ok:true,id:key},201)

@@ -135,3 +135,9 @@ Le flux de récupération met maintenant `force_password_change=0`. Après une r
 - Ce correctif ne développe **pas** les crédits, obligations, comptabilité, client read-only, permission granulaire, rapports complets ou import/export demandés dans le nouveau cahier des charges.
 - La base D1 existante n'est pas migrée ni effacée dans ce correctif.
 - Les tests inclus restent des tests locaux; validation Cloudflare et vérifications de sécurité complémentaires requises avant usage réel.
+
+## Création d'un administrateur bancaire par le Super Admin
+
+Dans **Administration → + Nouveau → 2**, sélectionner une institution active, saisir le nom et l'adresse e-mail de l'administrateur, puis confirmer. Une route réservée au Super Admin (`POST /api/admin/bank-admins`) vérifie la session et le jeton CSRF, refuse les e-mails en doublon et génère un mot de passe temporaire aléatoire (24 octets / 48 caractères hexadécimaux). Seule l'empreinte salée est enregistrée dans D1. Le mot de passe temporaire n'est renvoyé qu'une fois au navigateur, à la création ; il n'est jamais journalisé ou enregistré dans le stockage local. Le Super Admin doit le transmettre par un canal sûr. À sa première connexion dans l'onglet Administrateur, l'utilisateur doit changer ce mot de passe via **Mon compte**. La modification déconnecte ses sessions. L'administrateur est rattaché exclusivement à l'institution sélectionnée. Aucune migration supplémentaire n'est requise pour la table `users` existante.
+
+Limite : ce premier parcours ne fournit pas d'invitation e-mail ni de date d'expiration autonome pour le mot de passe temporaire. Le changement est obligatoire à la première connexion. Pour un déploiement bancaire de production, une expiration serveur et une approbation renforcée devront être ajoutées et validées.
