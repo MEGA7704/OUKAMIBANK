@@ -111,3 +111,11 @@ Ne supprimez pas le compte existant. Si `/api/setup-status` affiche `admin_exist
 Cette opération ne modifie pas les tables financières, les comptes clients ni les transactions. Elle s'appuie sur la table `audit_logs` existante : aucune migration SQL supplémentaire. Le jeton est marqué utilisé par une clé unique et une transaction D1 atomique. L'API refuse les récupérations si le secret n'est pas configuré, si le compte est absent ou inactif, ou si le jeton est déjà utilisé. Utilisez un jeton suffisamment aléatoire et supprimez-le immédiatement après l'opération.
 
 **Limites** : le fonctionnement sur l'instance Cloudflare du client doit être validé après déploiement. Les tests locaux ne prouvent pas à eux seuls que les bindings/secrets distants sont corrects.
+
+
+## Correctif affichage et changement initial de mot de passe
+- `hidden` masque maintenant effectivement la page de connexion après authentification.
+- Quand `force_password_change=1`, seul l’espace « Mon compte » est accessible.
+- Le formulaire utilise le mot de passe actuel (celui saisi lors de la dernière connexion), puis demande un nouveau mot de passe de 12 caractères minimum.
+- La modification invalide les sessions, impose une nouvelle connexion et débloque les pages après authentification.
+- Les listes Clients/Comptes/Mouvements sont réservées aux comptes rattachés à une institution; le Super Admin est administrateur de la plateforme, pas gestionnaire direct de ces comptes.
