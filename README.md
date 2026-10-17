@@ -141,3 +141,17 @@ Le flux de récupération met maintenant `force_password_change=0`. Après une r
 Dans **Administration → + Nouveau → 2**, sélectionner une institution active, saisir le nom et l'adresse e-mail de l'administrateur, puis confirmer. Une route réservée au Super Admin (`POST /api/admin/bank-admins`) vérifie la session et le jeton CSRF, refuse les e-mails en doublon et génère un mot de passe temporaire aléatoire (24 octets / 48 caractères hexadécimaux). Seule l'empreinte salée est enregistrée dans D1. Le mot de passe temporaire n'est renvoyé qu'une fois au navigateur, à la création ; il n'est jamais journalisé ou enregistré dans le stockage local. Le Super Admin doit le transmettre par un canal sûr. À sa première connexion dans l'onglet Administrateur, l'utilisateur doit changer ce mot de passe via **Mon compte**. La modification déconnecte ses sessions. L'administrateur est rattaché exclusivement à l'institution sélectionnée. Aucune migration supplémentaire n'est requise pour la table `users` existante.
 
 Limite : ce premier parcours ne fournit pas d'invitation e-mail ni de date d'expiration autonome pour le mot de passe temporaire. Le changement est obligatoire à la première connexion. Pour un déploiement bancaire de production, une expiration serveur et une approbation renforcée devront être ajoutées et validées.
+
+
+## Interface Super Admin V2 (inspirée des captures GLOBAL BT)
+
+Menus : Tableau de bord, Entreprises, Membres, Abonnements, Mots de passe, Journal, Mon compte. Les données proviennent des API D1, et non des images de référence. Les rôles sont vérifiés côté serveur.
+
+- Tableau de bord : nombres d'entreprises et de membres, répartition par dernier abonnement enregistré ; l'expiration est présentée par entreprise mais la répartition ne remplace pas une analyse des abonnements actifs.
+- Entreprises : liste, état, dernier plan et expiration, création, activation / désactivation. **La suppression n'est pas implémentée** pour éviter tout effacement accidentel de données financières.
+- Membres : liste des utilisateurs et création des administrateurs rattachés avec mot de passe temporaire affiché une seule fois.
+- Abonnements : historique limité à 100 dernières attributions, ajout via API existante. Une attribution ne prouve pas un paiement Wave.
+- Mots de passe : accès à Mon compte, sans consultation des secrets d'autres membres.
+- Journal : 100 dernières actions auditées.
+
+Aucune table D1 nouvelle, aucun script de migration supplémentaire. Déployer les fichiers avec les liaisons DB et CACHE existantes. Tester d'abord sur un environnement de préproduction. Les autres fonctionnalités du cahier des charges non encore développées ne sont pas implicitement prises en charge.
