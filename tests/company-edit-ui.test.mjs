@@ -1,0 +1,4 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';
+const worker=readFileSync('public/_worker.js','utf8'),ui=readFileSync('public/app.js','utf8'),html=readFileSync('public/index.html','utf8');
+test('edit company scoped to superadmin, no plaintext old password, sessions revoked on reset',()=>{assert.match(worker,/INSTITUTION_ADMIN_CREDENTIALS_UPDATED/);assert.match(worker,/password_hash=\?/);assert.match(worker,/DELETE FROM sessions WHERE user_id/);assert.match(worker,/u\.role==='superadmin'&&p==='\/api\/admin\/institutions\/edit'/);assert.doesNotMatch(worker,/SELECT .*password_hash.*admin_email/)});
+test('popup shows email, resets password optionally, confirmations are custom',()=>{assert.match(ui,/admin_email/);assert.match(ui,/Nouveau mot de passe \(facultatif/);assert.match(ui,/confirmAction\(/);assert.match(html,/id="noticeDialog"/);assert.match(html,/id="confirmDialog"/)});

@@ -163,3 +163,11 @@ Dans Super Admin → Entreprises → Nouvelle entreprise, saisir le nom de l'ins
 Les actions Modifier et Supprimer sont réservées au Super Admin. La suppression définitive concerne uniquement une entreprise sans clients, comptes, mouvements ni messages d'assistance. Si des données existent, utiliser Désactiver : aucune donnée bancaire n'est supprimée. Une confirmation saisie est exigée avant suppression. Une suppression d'entreprise vide retire ses administrateurs, leurs sessions et les abonnements associés, et conserve les traces d'audit.
 
 **Aucune migration D1 requise.** Vérifier d'abord les sauvegardes avant de déployer toute fonction de suppression. Les tests locaux ne prouvent pas la conformité de l'application pour une utilisation bancaire en production.
+
+## Mise à jour : modification d'entreprise et notifications
+
+Dans Super Admin → Entreprises → Modifier, le formulaire permet de modifier le nom de l'entreprise, le nom et l'e-mail de son administrateur principal, et de lui définir facultativement un **nouveau** mot de passe. Le mot de passe existant ne peut pas être consulté : seul son hachage est conservé en D1. La réinitialisation invalide les sessions de cet administrateur et ne force pas un second changement.
+
+Les confirmations d'activation, de désactivation et de suppression, ainsi que les résultats d'opérations, disposent de fenêtres professionnelles réutilisables. Les confirmations de suppression d'entreprises ayant des données financières restent refusées côté serveur.
+
+La fonctionnalité cible l'administrateur principal (premier administrateur lié à l'entreprise). Aucun mot de passe n'est retourné par l'API de consultation. Après déploiement, vérifier dans votre environnement Cloudflare le bon fonctionnement des liaisons D1/KV et des sessions.

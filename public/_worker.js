@@ -137,7 +137,7 @@ if(p==='/api/transactions'&&method==='POST'){
  await audit(db,u,'TRANSACTION_POSTED',ref);return json({ok:true,reference:ref},201)
 }
 if(p==='/api/admin/institutions'&&u.role==='superadmin'){
- if(method==='GET'){const r=await db.prepare('SELECT i.id,i.name,i.active,i.created_at,(SELECT s.plan_code FROM subscriptions s WHERE s.institution_id=i.id ORDER BY s.rowid DESC LIMIT 1) plan_code,(SELECT s.end_at FROM subscriptions s WHERE s.institution_id=i.id ORDER BY s.rowid DESC LIMIT 1) end_at FROM institutions i ORDER BY i.created_at DESC LIMIT 100').all();return json({items:r.results})}
+ if(method==='GET'){const r=await db.prepare("SELECT i.id,i.name,i.active,i.created_at,(SELECT u.email FROM users u WHERE u.institution_id=i.id AND u.role='admin' ORDER BY u.created_at ASC LIMIT 1) admin_email,(SELECT u.display_name FROM users u WHERE u.institution_id=i.id AND u.role='admin' ORDER BY u.created_at ASC LIMIT 1) admin_name,(SELECT s.plan_code FROM subscriptions s WHERE s.institution_id=i.id ORDER BY s.rowid DESC LIMIT 1) plan_code,(SELECT s.end_at FROM subscriptions s WHERE s.institution_id=i.id ORDER BY s.rowid DESC LIMIT 1) end_at FROM institutions i ORDER BY i.created_at DESC LIMIT 100").all();return json({items:r.results})}
  if(method==='POST'){if(!within(body.name))return json({error:'INVALID_NAME'},400);const key=id();await db.prepare('INSERT INTO institutions(id,name) VALUES(?,?)').bind(key,body.name.trim()).run();await audit(db,u,'INSTITUTION_CREATED',key);return json({ok:true,id:key},201)}
 }
 // Create institution and its first administrator atomically: neither may exist alone.
@@ -169,11 +169,15 @@ if(p==='/api/admin/institutions-with-admin'&&method==='POST'){
 // Refuse destructive deletion if any financial/operational records exist.
 if(u.role==='superadmin'&&p==='/api/admin/institutions/edit'&&method==='POST'){
  const institutionId=String(body.institution_id||'');const name=String(body.name||'').trim();
- if(!within(institutionId,100)||!within(name,160))return json({error:'INVALID_INSTITUTION'},400);
- const inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(institutionId).first();
- if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);
- await db.prepare('UPDATE institutions SET name=? WHERE id=?').bind(name,institutionId).run();
- await audit(db,u,'INSTITUTION_RENAMED',institutionId);return json({ok:true});
+ const email=String(body.admin_email||'').trim().toLowerCase();const adminName=String(body.admin_name||'').trim();const password=String(body.new_password||'');
+ if(!within(institutionId,100)||!within(name,160)||!within(adminName,160)||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>160||(password&&(password.length<12||password.length>256)))return json({error:'INVALID_COMPANY_DETAILS'},400);
+ const inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(institutionId).first();if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);
+ const admin=await db.prepare("SELECT id FROM users WHERE institution_id=? AND role='admin' ORDER BY created_at ASC LIMIT 1").bind(institutionId).first();if(!admin)return json({error:'COMPANY_ADMIN_NOT_FOUND'},409);
+ const conflict=await db.prepare('SELECT id FROM users WHERE email=? AND id<>?').bind(email,admin.id).first();if(conflict)return json({error:'EMAIL_ALREADY_USED'},409);
+ const commands=[db.prepare('UPDATE institutions SET name=? WHERE id=?').bind(name,institutionId),db.prepare("UPDATE users SET email=?,display_name=? WHERE id=? AND institution_id=? AND role='admin'").bind(email,adminName,admin.id,institutionId)];
+ if(password){const salt=hex(crypto.getRandomValues(new Uint8Array(16))),digest=await pbkdf(password,salt,NEW_PASSWORD_ITERATIONS);commands.push(db.prepare('UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,force_password_change=0,session_version=session_version+1 WHERE id=? AND institution_id=?').bind(digest,salt,NEW_PASSWORD_ITERATIONS,admin.id,institutionId));commands.push(db.prepare('DELETE FROM sessions WHERE user_id=?').bind(admin.id))}
+ await db.batch(commands);await audit(db,u,password?'INSTITUTION_ADMIN_CREDENTIALS_UPDATED':'INSTITUTION_UPDATED',institutionId);
+ return json({ok:true,password_changed:!!password},200,{'cache-control':'no-store'});
 }
 if(u.role==='superadmin'&&p==='/api/admin/institutions/delete'&&method==='POST'){
  const institutionId=String(body.institution_id||'');
