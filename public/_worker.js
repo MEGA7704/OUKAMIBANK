@@ -140,6 +140,30 @@ if(p==='/api/admin/institutions'&&u.role==='superadmin'){
  if(method==='GET'){const r=await db.prepare('SELECT i.id,i.name,i.active,i.created_at,(SELECT s.plan_code FROM subscriptions s WHERE s.institution_id=i.id ORDER BY s.rowid DESC LIMIT 1) plan_code,(SELECT s.end_at FROM subscriptions s WHERE s.institution_id=i.id ORDER BY s.rowid DESC LIMIT 1) end_at FROM institutions i ORDER BY i.created_at DESC LIMIT 100').all();return json({items:r.results})}
  if(method==='POST'){if(!within(body.name))return json({error:'INVALID_NAME'},400);const key=id();await db.prepare('INSERT INTO institutions(id,name) VALUES(?,?)').bind(key,body.name.trim()).run();await audit(db,u,'INSTITUTION_CREATED',key);return json({ok:true,id:key},201)}
 }
+// Create institution and its first administrator atomically: neither may exist alone.
+// The temporary password is returned only in the authenticated Super Admin response,
+// never logged, persisted in plaintext, put into a URL, or exposed to the new administrator.
+if(p==='/api/admin/institutions-with-admin'&&method==='POST'){
+ if(u.role!=='superadmin')return json({error:'FORBIDDEN'},403);
+ const institutionName=String(body.institution_name||'').trim();
+ const adminName=String(body.admin_name||'').trim();
+ const email=String(body.admin_email||'').trim().toLowerCase();
+ if(!within(institutionName,160)||!within(adminName,160)||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>160)return json({error:'INVALID_COMPANY_OR_ADMIN'},400);
+ const existing=await db.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
+ if(existing)return json({error:'EMAIL_ALREADY_USED'},409);
+ const institutionId=id(),adminId=id();
+ const temporaryPassword=hex(crypto.getRandomValues(new Uint8Array(24)));
+ const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
+ const digest=await pbkdf(temporaryPassword,salt,NEW_PASSWORD_ITERATIONS);
+ try{
+  await db.batch([
+   db.prepare('INSERT INTO institutions(id,name) VALUES(?,?)').bind(institutionId,institutionName),
+   db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) VALUES(?,?,?,?,?,?,?,?,1,1)').bind(adminId,institutionId,email,adminName,'admin',digest,salt,NEW_PASSWORD_ITERATIONS)
+  ]);
+ }catch(err){if(/UNIQUE|constraint/i.test(String(err)))return json({error:'EMAIL_ALREADY_USED_OR_COMPANY_CONFLICT'},409);throw err}
+ try{await audit(db,u,'INSTITUTION_AND_ADMIN_CREATED',institutionId)}catch(err){console.error('COMPANY_ADMIN_AUDIT_FAILED')}
+ return json({ok:true,institution_id:institutionId,admin_id:adminId,admin_email:email,temporary_password:temporaryPassword,force_password_change:true},201,{'cache-control':'no-store'});
+}
 // Super Admin read-only views and authorized institution status change.
 if(u.role==='superadmin'&&p==='/api/admin/members'&&method==='GET'){const r=await db.prepare('SELECT u.id,u.email,u.display_name,u.role,u.active,i.name institution_name FROM users u LEFT JOIN institutions i ON i.id=u.institution_id ORDER BY u.created_at DESC LIMIT 200').all();return json({items:r.results})}
 if(u.role==='superadmin'&&p==='/api/admin/subscription-list'&&method==='GET'){const r=await db.prepare('SELECT i.name,s.plan_code,s.start_at,s.end_at FROM subscriptions s JOIN institutions i ON i.id=s.institution_id ORDER BY s.rowid DESC LIMIT 100').all();return json({items:r.results})}
