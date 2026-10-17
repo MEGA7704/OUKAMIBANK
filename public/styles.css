@@ -13,3 +13,15 @@
 
 /* Espace Administrateur : grille bancaire inspirée de la densité informationnelle de GLOBAL BANK. */
 .premium-intro{background:linear-gradient(120deg,#193b2b,#316d51);color:white;padding:24px;border-radius:18px;margin-bottom:18px;box-shadow:0 10px 28px #142c2420}.premium-intro h2{margin:4px 0 10px}.premium-intro p{opacity:.88;margin:0}.premium-intro .eyebrow{color:#d6e6dc}.premium-grid{margin-bottom:16px}.bank-shortcuts{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:18px 0}.bank-shortcuts button{cursor:pointer;border:1px solid #d5e4db;border-radius:12px;padding:15px;background:#fff;text-align:left;font-weight:700;color:#214735;transition:background .15s}.bank-shortcuts button:hover{background:#eaf4ee}.report-filter{display:flex;flex-wrap:wrap;gap:12px;align-items:end}.report-filter label{flex:1;min-width:180px}@media print{header,nav,footer,.report-filter,#reportPrint,.top button{display:none!important}.card{box-shadow:none!important}}
+
+/* Pages pleine largeur et fiches clients */
+#app main{width:100%;max-width:none!important;margin:0;padding:24px clamp(12px,2.2vw,40px)}
+#app #content{width:100%}#app .tablebox{width:100%}
+#modal:has(.client-group){width:min(1080px,98vw);max-height:94vh;padding:clamp(16px,2.6vw,35px)}
+.client-group{border:1px solid #d6e4da;border-radius:12px;padding:12px 18px 20px;margin:18px 0;background:#fbfdfb}
+.client-group legend{font-weight:750;color:#1d4933;padding:0 8px}
+.client-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0 16px}
+.client-fields label{min-width:0}.client-fields input,.client-fields select{max-width:100%}
+#client-person[hidden],#client-company[hidden]{display:none!important}
+@media(max-width:900px){.client-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.client-fields{grid-template-columns:1fr}#app main{padding:16px 12px}}

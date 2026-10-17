@@ -171,3 +171,13 @@ Dans Super Admin → Entreprises → Modifier, le formulaire permet de modifier 
 Les confirmations d'activation, de désactivation et de suppression, ainsi que les résultats d'opérations, disposent de fenêtres professionnelles réutilisables. Les confirmations de suppression d'entreprises ayant des données financières restent refusées côté serveur.
 
 La fonctionnalité cible l'administrateur principal (premier administrateur lié à l'entreprise). Aucun mot de passe n'est retourné par l'API de consultation. Après déploiement, vérifier dans votre environnement Cloudflare le bon fonctionnement des liaisons D1/KV et des sessions.
+
+## Mise à jour — inscription des clients et pleine largeur
+
+- Tous les écrans métier utilisent désormais toute la largeur disponible.
+- `Clients` → `+ Nouveau` : formulaire personne physique ou personne morale avec sections et champs obligatoires selon le type.
+- Les nouvelles données sont stockées dans `clients.details_json` (JSON côté serveur) et les colonnes existantes `name`, `phone`, `number`, `kind` restent compatibles.
+- **Base D1 EXISTANTE** : exécuter **une seule fois** `migrations/0002_client_details.sql` dans la Console D1 de `mega_bank_db` AVANT de publier le code. Cette migration ajoute une colonne sans supprimer les clients existants.
+- **Base NEUVE** : `migrations/0001_initial.sql` contient déjà la nouvelle colonne ; ne pas exécuter `0002` sur une base créée avec le nouveau `0001`.
+- Cette livraison ne comprend pas la gestion des fichiers de pièces justificatives ; seuls les types et numéros sont enregistrés.
+- Vérifications : syntaxe JS, 25 tests existants, schémas SQLite sur base neuve et migration simulée sur base existante. Tests en Cloudflare réel restant à effectuer.
