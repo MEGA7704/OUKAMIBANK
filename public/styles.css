@@ -106,3 +106,5 @@
  #modal.client-registration-modal .actions button{min-width:0;flex:1}
  #modal.client-registration-modal #fields{padding:12px}
 }
+
+#modal.client-registration-modal{width:min(1200px,calc(100vw - 32px));max-width:calc(100vw - 32px)}.client-row-actions{display:flex;gap:5px;flex-wrap:wrap}.client-row-actions button{font-size:12px;padding:7px 9px}.client-row-actions button:last-child{background:#a3333b}.client-row-actions button:nth-child(2){background:#b78e45}#modal.client-registration-modal .client-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}#modal.client-registration-modal textarea{width:100%;max-width:100%}@media(max-width:900px){#modal.client-registration-modal .client-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:600px){#modal.client-registration-modal .client-fields{grid-template-columns:1fr}}

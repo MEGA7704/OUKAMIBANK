@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS plans(code TEXT PRIMARY KEY,price INTEGER NOT NULL,du
 INSERT OR IGNORE INTO plans(code,price,duration_days) VALUES('FREE',0,10),('STANDARD',20000,30),('BUSINESS',200000,365),('ULTIMATE',600000,30);
 CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY,institution_id TEXT NOT NULL REFERENCES institutions(id),plan_code TEXT NOT NULL REFERENCES plans(code),start_at TEXT NOT NULL,end_at TEXT NOT NULL,created_by TEXT REFERENCES users(id));
 CREATE INDEX IF NOT EXISTS subs_institution ON subscriptions(institution_id,start_at);
-CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY,institution_id TEXT NOT NULL REFERENCES institutions(id),number TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('PERSON','COMPANY')),name TEXT NOT NULL,phone TEXT,identity_ref TEXT,details_json TEXT,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(institution_id,number));
+CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY,institution_id TEXT NOT NULL REFERENCES institutions(id),number TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('PERSON','COMPANY')),name TEXT NOT NULL,phone TEXT,identity_ref TEXT,details_json TEXT,block_reason TEXT,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(institution_id,number));
 CREATE INDEX IF NOT EXISTS clients_inst ON clients(institution_id,created_at);
 CREATE TABLE IF NOT EXISTS accounts(id TEXT PRIMARY KEY,institution_id TEXT NOT NULL REFERENCES institutions(id),client_id TEXT NOT NULL REFERENCES clients(id),number TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION')),balance INTEGER NOT NULL DEFAULT 0 CHECK(balance >= 0),status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','BLOCKED','CLOSED')),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(institution_id,number));
 CREATE INDEX IF NOT EXISTS accounts_inst ON accounts(institution_id,client_id);
@@ -25,3 +25,5 @@ CREATE TRIGGER IF NOT EXISTS transaction_immutable_delete BEFORE DELETE ON trans
 CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY,user_id TEXT, institution_id TEXT,action TEXT NOT NULL,detail TEXT,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE INDEX IF NOT EXISTS audit_inst_date ON audit_logs(institution_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS support_messages(id TEXT PRIMARY KEY,institution_id TEXT,created_by TEXT,body TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+
+CREATE TRIGGER IF NOT EXISTS transaction_client_active BEFORE INSERT ON transactions BEGIN SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.id=NEW.account_id AND a.institution_id=NEW.institution_id AND c.active=1) THEN RAISE(ABORT,'CLIENT_BLOCKED') END; END;

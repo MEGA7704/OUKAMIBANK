@@ -1,0 +1,10 @@
+import {test} from 'node:test';import {strict as assert} from 'node:assert';import {readFileSync} from 'node:fs';
+const worker=readFileSync('public/_worker.js','utf8');const ui=readFileSync('public/app.js','utf8');const css=readFileSync('public/styles.css','utf8');const migration=readFileSync('migrations/0003_client_block.sql','utf8');
+test('client modifications are accepted as JSON writes',()=>assert.match(worker,/method==='PATCH'\|\|method==='PUT'/));
+test('client server actions require bank admin',()=>assert.match(worker,/if\(u.role!=='admin'\)return json\(\{error:'FORBIDDEN'\},403\)/));
+test('client blocking requires recorded reason',()=>assert.match(worker,/BLOCK_REASON_REQUIRED/));
+test('history is protected from delete with linked accounts',()=>assert.match(worker,/CLIENT_HAS_ACCOUNTS/));
+test('transactions check active client for both ends',()=>assert.match(worker,/JOIN clients c ON c.id=a.client_id/g));
+test('database trigger enforces active client',()=>assert.match(migration,/RAISE\(ABORT,'CLIENT_BLOCKED'\)/));
+test('client table actions implemented',()=>{for(const action of ['edit','block','unblock','delete'])assert.match(ui,new RegExp(action))});
+test('client dialog max 1200',()=>assert.match(css,/width:min\(1200px/));

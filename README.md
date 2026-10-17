@@ -185,3 +185,10 @@ La fonctionnalité cible l'administrateur principal (premier administrateur lié
 ## Mise à jour — inscription client grand format
 
 La fenêtre « Clients → Nouveau » occupe jusqu'à 1420 px en largeur sur ordinateur et s'adapte aux petits écrans. Les sections et le choix personne physique / personne morale sont conservés. Aucun défilement horizontal n'est utilisé dans cette fenêtre ; sur écran court, le contenu défile verticalement et les boutons d'action restent accessibles. Aucun changement SQL supplémentaire par rapport à la version précédente ; appliquer `migrations/0002_client_details.sql` uniquement si `clients.details_json` n'existe pas.
+
+## Mise à jour : actions clients
+- Dialogue Inscription limité à 1 200 px, sans défilement horizontal.
+- Dans Clients : Modifier, Bloquer (motif obligatoire), Débloquer, Supprimer (confirmation).
+- Blocage : le serveur et une contrainte D1 rejettent les mouvements sur tous les comptes du client bloqué, y compris la destination d'un virement.
+- Suppression définitive refusée si le client possède un compte, afin de conserver l'historique financier.
+- Base D1 déjà déployée : appliquer **une seule fois** `migrations/0003_client_block.sql` après sauvegarde. Ne pas relancer `0001_initial.sql`.

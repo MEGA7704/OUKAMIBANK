@@ -1,0 +1,1 @@
+MEGA BANK : pour votre D1 existante, exécutez une seule fois le fichier migrations/0003_client_block.sql dans la console D1. Sauvegardez la base avant migration. Le client bloqué reste conservé, toutes ses écritures restent intactes. Une suppression est refusée si un compte bancaire est associé. Pour une base neuve, utilisez uniquement migrations/0001_initial.sql.

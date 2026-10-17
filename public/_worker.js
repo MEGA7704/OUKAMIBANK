@@ -64,7 +64,7 @@ async function adminSetupStatus(db,env){
  if(Number(check?.n)>0)return {ready:true,admin_exists:true,bootstrap:status.state};
  return {ready:false,error:'SUPERADMIN_NOT_INITIALIZED',bootstrap:status.state};
 }
-async function route(req,env){const db=env.DB;if(!db)return json({error:'D1_NOT_CONFIGURED'},503);const url=new URL(req.url),p=url.pathname,method=req.method;let body={};if(method==='POST'||method==='PATCH'){if(Number(req.headers.get('content-length')||0)>100000)return json({error:'BODY_TOO_LARGE'},413);try{body=await req.json()}catch{return json({error:'INVALID_JSON'},400)}}
+async function route(req,env){const db=env.DB;if(!db)return json({error:'D1_NOT_CONFIGURED'},503);const url=new URL(req.url),p=url.pathname,method=req.method;let body={};if(method==='POST'||method==='PATCH'||method==='PUT'){if(Number(req.headers.get('content-length')||0)>100000)return json({error:'BODY_TOO_LARGE'},413);try{body=await req.json()}catch{return json({error:'INVALID_JSON'},400)}}
 if(p==='/api/setup-status'&&method==='GET')return json(await adminSetupStatus(db,env));
 // Emergency administrator recovery: separate high-entropy one-use token, never the bootstrap password.
 // A deterministic audit_logs primary key makes token reuse fail atomically in D1.batch.
@@ -135,7 +135,7 @@ if((p==='/api/bank/insights'||p==='/api/bank/report')&&method==='GET'){
   db.prepare(`SELECT substr(created_at,1,7) month,COUNT(*) movements,COALESCE(SUM(CASE WHEN kind='DEPOSIT' THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN kind='WITHDRAWAL' THEN amount ELSE 0 END),0) withdrawals FROM transactions WHERE institution_id=? AND created_at>=datetime('now','-12 months') GROUP BY substr(created_at,1,7) ORDER BY month DESC LIMIT 12`).bind(u.institution_id)]);
  return json({institution:ins?.name||'',balance:b.results[0].balance,...t.results[0],months:m.results});
 }
-if(p==='/api/clients'&&method==='GET'){if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);const page=Math.min(100,Math.max(1,Number(url.searchParams.get('page')||1))),q=String(url.searchParams.get('q')||'').slice(0,80);const rows=await db.prepare('SELECT id,number,kind,name,phone,active,created_at FROM clients WHERE institution_id=? AND (name LIKE ? OR number LIKE ? OR phone LIKE ?) ORDER BY created_at DESC,id DESC LIMIT 21 OFFSET ?').bind(u.institution_id,...Array(3).fill('%'+q+'%'),(page-1)*20).all();return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page})}
+if(p==='/api/clients'&&method==='GET'){if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);const page=Math.min(100,Math.max(1,Number(url.searchParams.get('page')||1))),q=String(url.searchParams.get('q')||'').slice(0,80);const rows=await db.prepare('SELECT id,number,kind,name,phone,active,block_reason,created_at FROM clients WHERE institution_id=? AND (name LIKE ? OR number LIKE ? OR phone LIKE ?) ORDER BY created_at DESC,id DESC LIMIT 21 OFFSET ?').bind(u.institution_id,...Array(3).fill('%'+q+'%'),(page-1)*20).all();return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page})}
 if(p==='/api/clients'&&method==='POST'){
  if(!writable(u,'clients')||!u.institution_id)return json({error:'FORBIDDEN'},403);
  if(!['PERSON','COMPANY'].includes(body.kind))return json({error:'INVALID_CLIENT_TYPE'},400);
@@ -153,16 +153,50 @@ if(p==='/api/clients'&&method==='POST'){
  await db.prepare('INSERT INTO clients(id,institution_id,number,kind,name,phone,details_json) VALUES(?,?,?,?,?,?,?)').bind(key,u.institution_id,no,body.kind,name,phone,JSON.stringify(details)).run();
  await audit(db,u,'CLIENT_CREATED',key);return json({ok:true,id:key,number:no},201)
 }
+if(p.startsWith('/api/clients/') && ['GET','PUT','DELETE'].includes(method)){
+ const clientId=decodeURIComponent(p.slice('/api/clients/'.length));
+ if(!clientId||clientId.includes('/'))return json({error:'INVALID_CLIENT_ID'},400);
+ const client=await db.prepare('SELECT id,kind,name,phone,active,details_json FROM clients WHERE id=? AND institution_id=?').bind(clientId,u.institution_id).first();
+ if(!client)return json({error:'CLIENT_NOT_FOUND'},404);
+ if(method==='GET')return json({client:{...client,details:JSON.parse(client.details_json||'{}')}});
+ if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+ if(method==='DELETE'){
+  const linked=await db.prepare('SELECT COUNT(*) n FROM accounts WHERE client_id=? AND institution_id=?').bind(clientId,u.institution_id).first();
+  if(Number(linked.n)>0)return json({error:'CLIENT_HAS_ACCOUNTS',hint:'Le client possède des comptes : bloquez-le pour conserver son historique financier.'},409);
+  await db.prepare('DELETE FROM clients WHERE id=? AND institution_id=? AND NOT EXISTS (SELECT 1 FROM accounts WHERE client_id=?)').bind(clientId,u.institution_id,clientId).run();
+  await audit(db,u,'CLIENT_DELETED',clientId);return json({ok:true});
+ }
+ if(body.action==='block'){
+  if(!within(body.reason,500))return json({error:'BLOCK_REASON_REQUIRED'},400);
+  await db.prepare('UPDATE clients SET active=0,block_reason=? WHERE id=? AND institution_id=?').bind(body.reason.trim(),clientId,u.institution_id).run();
+  await audit(db,u,'CLIENT_BLOCKED',clientId);return json({ok:true});
+ }
+ if(body.action==='unblock'){
+  await db.prepare('UPDATE clients SET active=1,block_reason=NULL WHERE id=? AND institution_id=?').bind(clientId,u.institution_id).run();
+  await audit(db,u,'CLIENT_UNBLOCKED',clientId);return json({ok:true});
+ }
+ if(body.action==='edit'){
+  const current=JSON.parse(client.details_json||'{}');const keys=client.kind==='PERSON'?['last_name','first_name','birth_date','birth_place','sex','profession','identity_type','identity_number','phone','whatsapp','commune','neighborhood','emergency_name','emergency_phone','emergency_relation']:['company_name','acronym','legal_form','activity','registration','tax_number','creation_date','city','company_commune','company_neighborhood','headquarters','company_phone','company_whatsapp','company_email','representative_last','representative_first','representative_role','representative_phone','representative_id_type','representative_id_number'];
+  const next={...current};for(const key of keys){if(body[key]!==undefined){if(typeof body[key]!=='string'||body[key].length>180)return json({error:'INVALID_CLIENT_FIELDS'},400);next[key]=body[key].trim()}}
+  const mandatory=client.kind==='PERSON'?['last_name','first_name','birth_date','birth_place','sex','identity_type','identity_number','phone','commune','neighborhood','emergency_name','emergency_phone','emergency_relation']:['company_name','legal_form','company_phone','representative_last','representative_phone','representative_id_type','representative_id_number'];
+  if(mandatory.some(k=>!next[k]))return json({error:'INVALID_CLIENT_FIELDS'},400);
+  const name=client.kind==='PERSON'?`${next.last_name} ${next.first_name}`:next.company_name;
+  const phone=client.kind==='PERSON'?next.phone:next.company_phone;
+  await db.prepare('UPDATE clients SET name=?,phone=?,details_json=? WHERE id=? AND institution_id=?').bind(name,phone,JSON.stringify(next),clientId,u.institution_id).run();
+  await audit(db,u,'CLIENT_UPDATED',clientId);return json({ok:true});
+ }
+ return json({error:'INVALID_ACTION'},400);
+}
 if(p==='/api/accounts'&&method==='GET'){if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);const page=Math.min(100,Math.max(1,Number(url.searchParams.get('page')||1)));const rows=await db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,c.name client FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.institution_id=? ORDER BY a.created_at DESC,a.id DESC LIMIT 21 OFFSET ?').bind(u.institution_id,(page-1)*20).all();return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page})}
 if(p==='/api/accounts'&&method==='POST'){if(u.role!=='admin')return json({error:'FORBIDDEN'},403);if(!['CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION'].includes(body.kind))return json({error:'INVALID_ACCOUNT_TYPE'},400);const client=await db.prepare('SELECT id FROM clients WHERE id=? AND institution_id=? AND active=1').bind(body.client_id,u.institution_id).first();if(!client)return json({error:'CLIENT_NOT_FOUND'},404);const key=id(),no='MB-'+key.slice(0,12).toUpperCase();await db.prepare('INSERT INTO accounts(id,institution_id,client_id,number,kind) VALUES(?,?,?,?,?)').bind(key,u.institution_id,body.client_id,no,body.kind).run();await audit(db,u,'ACCOUNT_CREATED',key);return json({ok:true,id:key,number:no},201)}
 if(p==='/api/transactions'&&method==='GET'){if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);const page=Math.min(1000,Math.max(1,Number(url.searchParams.get('page')||1)));const rows=await db.prepare('SELECT t.id,t.reference,t.kind,t.amount,t.delta,t.created_at,a.number account FROM transactions t JOIN accounts a ON a.id=t.account_id WHERE t.institution_id=? ORDER BY t.created_at DESC,t.id DESC LIMIT 21 OFFSET ?').bind(u.institution_id,(page-1)*20).all();return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page})}
 if(p==='/api/transactions'&&method==='POST'){
  if(!writable(u,'transactions'))return json({error:'FORBIDDEN'},403);if(!['DEPOSIT','WITHDRAWAL','TRANSFER'].includes(body.kind)||!money(body.amount)||!within(body.operation_key,100))return json({error:'INVALID_TRANSACTION'},400);
- const source=await db.prepare('SELECT id FROM accounts WHERE id=? AND institution_id=? AND status=?').bind(body.account_id,u.institution_id,'ACTIVE').first();if(!source)return json({error:'ACCOUNT_NOT_FOUND'},404);
+ const source=await db.prepare('SELECT a.id FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.id=? AND a.institution_id=? AND a.status=? AND c.active=1').bind(body.account_id,u.institution_id,'ACTIVE').first();if(!source)return json({error:'ACCOUNT_NOT_FOUND'},404);
  const op=body.operation_key,ref='TX-'+id().slice(0,12).toUpperCase(),newid=id();const dup=await db.prepare('SELECT reference FROM transactions WHERE institution_id=? AND operation_key=? LIMIT 1').bind(u.institution_id,op).first();if(dup)return json({ok:true,reference:dup.reference,duplicate:true});
  const amt=body.amount,kind=body.kind,desc=String(body.description||'').slice(0,300);
  const commands=[];
- if(kind==='TRANSFER'){if(body.destination_id===body.account_id)return json({error:'SAME_ACCOUNT'},400);const dest=await db.prepare('SELECT id FROM accounts WHERE id=? AND institution_id=? AND status=?').bind(body.destination_id,u.institution_id,'ACTIVE').first();if(!dest)return json({error:'DESTINATION_NOT_FOUND'},404);commands.push(db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(newid,u.institution_id,op,1,source.id,'TRANSFER_OUT',amt,-amt,ref,desc,u.id));commands.push(db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(id(),u.institution_id,op,2,dest.id,'TRANSFER_IN',amt,amt,ref,desc,u.id))}
+ if(kind==='TRANSFER'){if(body.destination_id===body.account_id)return json({error:'SAME_ACCOUNT'},400);const dest=await db.prepare('SELECT a.id FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.id=? AND a.institution_id=? AND a.status=? AND c.active=1').bind(body.destination_id,u.institution_id,'ACTIVE').first();if(!dest)return json({error:'DESTINATION_NOT_FOUND'},404);commands.push(db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(newid,u.institution_id,op,1,source.id,'TRANSFER_OUT',amt,-amt,ref,desc,u.id));commands.push(db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(id(),u.institution_id,op,2,dest.id,'TRANSFER_IN',amt,amt,ref,desc,u.id))}
  else commands.push(db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(newid,u.institution_id,op,1,source.id,kind,amt,kind==='DEPOSIT'?amt:-amt,ref,desc,u.id));
  try{await db.batch(commands)}catch(e){const duplicate=await db.prepare('SELECT reference FROM transactions WHERE institution_id=? AND operation_key=? LIMIT 1').bind(u.institution_id,op).first();if(duplicate)return json({ok:true,reference:duplicate.reference,duplicate:true});return json({error:String(e).includes('INSUFFICIENT_FUNDS')?'INSUFFICIENT_FUNDS':'TRANSACTION_REJECTED'},409)}
  await audit(db,u,'TRANSACTION_POSTED',ref);return json({ok:true,reference:ref},201)
