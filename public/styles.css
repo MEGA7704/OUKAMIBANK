@@ -25,3 +25,84 @@
 #client-person[hidden],#client-company[hidden]{display:none!important}
 @media(max-width:900px){.client-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:600px){.client-fields{grid-template-columns:1fr}#app main{padding:16px 12px}}
+
+/* Inscription client : grand dialogue responsive, sans débordement horizontal */
+#modal.client-registration-modal {
+  width:min(1420px, calc(100vw - 32px));
+  max-width:calc(100vw - 32px);
+  max-height:calc(100dvh - 26px);
+  padding:0;
+  overflow:hidden;
+  border:1px solid #d8e8e6;
+  border-radius:20px;
+  background:#f4f8f7;
+}
+#modal.client-registration-modal #modalForm {
+  display:flex;
+  flex-direction:column;
+  max-height:calc(100dvh - 26px);
+  min-width:0;
+  overflow:hidden;
+}
+#modal.client-registration-modal #modalTitle {
+  flex:none;
+  margin:0;
+  padding:21px clamp(16px,2.3vw,34px);
+  font-size:clamp(19px,2vw,26px);
+  color:#fff;
+  background:linear-gradient(105deg,#063e38,#126153);
+  border-bottom:4px solid #eac05e;
+}
+#modal.client-registration-modal #fields {
+  flex:1;
+  min-height:0;
+  min-width:0;
+  overflow-y:auto;
+  overflow-x:hidden;
+  padding:20px clamp(14px,2.2vw,32px);
+  scrollbar-gutter:stable;
+}
+#modal.client-registration-modal .actions {
+  flex:none;
+  position:relative;
+  margin:0;
+  padding:14px clamp(16px,2.3vw,34px);
+  border-top:1px solid #d9e6e2;
+  background:#fff;
+}
+#modal.client-registration-modal .actions button {min-width:124px}
+.client-intro {padding:14px 18px;background:#fff;border:1px solid #d7e7e2;border-radius:13px;margin-bottom:14px}
+.client-intro p {margin:8px 0 0;color:#526f67;font-size:13px;line-height:1.5}
+.client-form-badge {font-size:11px;font-weight:800;letter-spacing:1.4px;color:#0d6459}
+.client-kind-row {background:#e6f2ee;border:1px solid #cfe4dc;padding:5px 16px;border-radius:12px;margin-bottom:14px}
+.client-kind-row label {max-width:500px;margin:7px 0;font-size:13px}
+#modal.client-registration-modal .client-group {
+  min-width:0;
+  padding:13px clamp(12px,1.7vw,24px) 18px;
+  margin:16px 0;
+  border:1px solid #d5e5e1;
+  background:#fff;
+  box-shadow:0 4px 16px #0b403809;
+}
+#modal.client-registration-modal .client-group legend {font-size:15px;color:#07584f;font-weight:800}
+#modal.client-registration-modal .client-fields {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  column-gap:clamp(12px,1.6vw,24px);
+  row-gap:7px;
+  min-width:0;
+}
+#modal.client-registration-modal .client-fields label {font-size:13px;margin:4px 0;min-width:0;overflow-wrap:anywhere}
+#modal.client-registration-modal .client-fields input,
+#modal.client-registration-modal .client-fields select {display:block;width:100%;max-width:100%;min-width:0;margin-top:7px;padding:12px 13px;border-color:#d2e1df}
+#modal.client-registration-modal .client-fields input:focus,
+#modal.client-registration-modal .client-fields select:focus {outline:2px solid #2c8977;outline-offset:1px}
+@media(max-width:940px){#modal.client-registration-modal .client-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:580px){
+ #modal.client-registration-modal{width:calc(100vw - 12px);max-width:calc(100vw - 12px);max-height:calc(100dvh - 12px);border-radius:12px}
+ #modal.client-registration-modal #modalForm{max-height:calc(100dvh - 12px)}
+ #modal.client-registration-modal .client-fields{grid-template-columns:minmax(0,1fr)}
+ #modal.client-registration-modal .actions{padding:12px;gap:8px}
+ #modal.client-registration-modal .actions button{min-width:0;flex:1}
+ #modal.client-registration-modal #fields{padding:12px}
+}

@@ -181,3 +181,7 @@ La fonctionnalité cible l'administrateur principal (premier administrateur lié
 - **Base NEUVE** : `migrations/0001_initial.sql` contient déjà la nouvelle colonne ; ne pas exécuter `0002` sur une base créée avec le nouveau `0001`.
 - Cette livraison ne comprend pas la gestion des fichiers de pièces justificatives ; seuls les types et numéros sont enregistrés.
 - Vérifications : syntaxe JS, 25 tests existants, schémas SQLite sur base neuve et migration simulée sur base existante. Tests en Cloudflare réel restant à effectuer.
+
+## Mise à jour — inscription client grand format
+
+La fenêtre « Clients → Nouveau » occupe jusqu'à 1420 px en largeur sur ordinateur et s'adapte aux petits écrans. Les sections et le choix personne physique / personne morale sont conservés. Aucun défilement horizontal n'est utilisé dans cette fenêtre ; sur écran court, le contenu défile verticalement et les boutons d'action restent accessibles. Aucun changement SQL supplémentaire par rapport à la version précédente ; appliquer `migrations/0002_client_details.sql` uniquement si `clients.details_json` n'existe pas.
