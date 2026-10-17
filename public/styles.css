@@ -143,3 +143,31 @@
   .auth .access-options{justify-content:flex-start}
   .auth .access-options label{min-width:140px;padding:10px}
 }
+
+/* MEGA BANK – Connexion soignée : trois choix dans le cadre, sans scroll horizontal. */
+.auth{padding:18px}
+.auth .login{width:min(560px,calc(100vw - 24px));padding:28px clamp(18px,4vw,34px) 25px;gap:0}
+.auth .login-badge{margin-bottom:12px}
+.auth .auth-head{margin-bottom:4px}
+.auth .auth-head .sub{margin:7px 0 22px}
+.auth .access-choice{min-width:0;width:100%;margin:0 0 20px;padding:12px 12px 14px;white-space:normal;overflow:visible;border-radius:13px}
+.auth .access-choice legend{width:auto;max-width:100%;padding:0 8px;margin:0 auto;text-align:center;font-size:13px;white-space:nowrap}
+.auth .access-choice legend span{padding:0 7px}
+.auth .access-options{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:8px;min-width:0!important;width:100%;justify-content:stretch}
+.auth .access-options label{min-width:0!important;max-width:100%;width:100%;padding:10px 5px;min-height:50px;gap:5px;flex-wrap:nowrap;overflow:hidden;border-radius:10px;font-size:clamp(10px,1.55vw,13px)!important;line-height:1.2;justify-content:center;white-space:nowrap}
+.auth .access-options label span{display:block;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:inherit}
+.auth .access-options input{flex:0 0 14px;width:14px;height:14px;accent-color:#12604d}
+.auth .disabled-option small{display:block;font-size:10px;white-space:nowrap}
+.auth #loginForm>label{margin:9px 0 13px;font-weight:650}
+.auth #loginForm>label input{margin-top:7px}
+.auth #loginForm>.primary{margin-top:13px}
+.auth .secure-note{margin:18px 0 0}
+.auth #loginError{min-height:18px;text-align:center;margin-bottom:0}
+@media(max-width:560px){
+ .auth .login{padding:23px 15px 20px}
+ .auth .access-choice{padding:12px 6px}
+ .auth .access-options{gap:5px}
+ .auth .access-options label{padding:9px 2px;gap:3px;min-height:49px;font-size:10px!important}
+ .auth .disabled-option small{font-size:9px}
+ .auth .access-options input{flex-basis:12px;width:12px;height:12px}
+}
