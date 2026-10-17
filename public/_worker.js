@@ -66,6 +66,40 @@ async function adminSetupStatus(db,env){
 }
 async function route(req,env){const db=env.DB;if(!db)return json({error:'D1_NOT_CONFIGURED'},503);const url=new URL(req.url),p=url.pathname,method=req.method;let body={};if(method==='POST'||method==='PATCH'){if(Number(req.headers.get('content-length')||0)>100000)return json({error:'BODY_TOO_LARGE'},413);try{body=await req.json()}catch{return json({error:'INVALID_JSON'},400)}}
 if(p==='/api/setup-status'&&method==='GET')return json(await adminSetupStatus(db,env));
+// Emergency administrator recovery: separate high-entropy one-use token, never the bootstrap password.
+// A deterministic audit_logs primary key makes token reuse fail atomically in D1.batch.
+if(p==='/api/admin/recover'&&method==='POST'){
+ const configured=env.SUPER_ADMIN_RECOVERY_TOKEN;
+ if(typeof configured!=='string'||configured.length<32||configured.length>512)return json({error:'RECOVERY_NOT_CONFIGURED'},503);
+ const supplied=req.headers.get('x-mega-recovery-token')||'';
+ const newPassword=body?.new_password;
+ const email=String(env.SUPER_ADMIN_EMAIL||'mega@services.local').trim().toLowerCase();
+ const clientIp=(req.headers.get('cf-connecting-ip')||'unknown').slice(0,128);
+ const throttle='admin-recovery:'+await hash(clientIp);
+ const failures=Number(await env.CACHE?.get(throttle)||0);
+ if(failures>=5)return json({error:'RECOVERY_RATE_LIMITED'},429);
+ const allowed=typeof newPassword==='string'&&newPassword.length>=12&&newPassword.length<=256
+  &&supplied.length===configured.length&&eq(await hash(supplied),await hash(configured));
+ if(!allowed){await env.CACHE?.put(throttle,String(failures+1),{expirationTtl:900});return json({error:'RECOVERY_DENIED'},403)}
+ const admin=await db.prepare("SELECT id FROM users WHERE email=? AND role='superadmin' AND active=1").bind(email).first();
+ if(!admin)return json({error:'RECOVERY_DENIED'},403);
+ const marker=await hash('MEGA_BANK_RECOVERY_V1:'+supplied);
+ const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
+ const digest=await pbkdf(newPassword,salt,NEW_PASSWORD_ITERATIONS);
+ try{
+  // D1 batch is transactional; duplicate marker => all statements rolled back.
+  await db.batch([
+   db.prepare("INSERT INTO audit_logs(id,user_id,institution_id,action,detail) VALUES(?,?,NULL,'SUPERADMIN_PASSWORD_RECOVERED','one-time recovery')").bind(marker,admin.id),
+   db.prepare("UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,force_password_change=1,session_version=session_version+1 WHERE id=? AND role='superadmin' AND active=1").bind(digest,salt,NEW_PASSWORD_ITERATIONS,admin.id),
+   db.prepare('DELETE FROM sessions WHERE user_id=?').bind(admin.id)
+  ]);
+ }catch(e){
+  if(/UNIQUE|constraint|PRIMARY KEY/i.test(String(e?.message||e)))return json({error:'RECOVERY_TOKEN_ALREADY_USED'},409);
+  console.error('MEGA_RECOVERY_DATABASE_FAILURE',e);return json({error:'RECOVERY_DATABASE_ERROR'},503);
+ }
+ await env.CACHE?.delete(throttle);
+ return json({ok:true,code:'PASSWORD_RESET_SUCCESS',next:'REMOVE_RECOVERY_SECRET_AND_REDEPLOY'},200);
+}
 if(p==='/api/login'&&method==='POST'){
  const setup=await adminSetupStatus(db,env);if(!setup.ready)return json(setup,503);
  const email=String(body.email||'').trim().toLowerCase(),pw=String(body.password||'');if(!email||pw.length>256)return json({error:'INVALID_CREDENTIALS'},401);
