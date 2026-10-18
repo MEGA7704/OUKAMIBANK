@@ -193,3 +193,9 @@
 .accounts-header h2{margin-bottom:4px}.accounts-table th{text-align:center;background:#06443c;color:white}.accounts-table .amount{text-align:right;font-variant-numeric:tabular-nums}.accounts-table td:last-child{text-align:center}
 @media(max-width:850px){.account-controls{grid-template-columns:1fr}.accounts-table th,.accounts-table td{padding:8px 6px;font-size:12px}}
 @media print{.account-controls,.pager,.accounts-table th:last-child,.accounts-table td:last-child{display:none!important}}
+
+/* Mouvements : affichage optimisé et impression de la page filtrée */
+.movement-toolbar{flex-wrap:wrap;justify-content:flex-start}.movement-toolbar input{max-width:580px;flex:1 1 250px}.movement-toolbar button{white-space:nowrap}
+#app:has(a[data-page="transactions"].active) .tablebox th{text-align:center}
+#app:has(a[data-page="transactions"].active) .tablebox td:nth-child(7){text-align:right;font-weight:750;white-space:nowrap}
+@media print{#app:has(a[data-page="transactions"].active) header,#app:has(a[data-page="transactions"].active) footer,#app:has(a[data-page="transactions"].active) .movement-toolbar,#app:has(a[data-page="transactions"].active) .pager,#app:has(a[data-page="transactions"].active) .row-actions{display:none!important}}

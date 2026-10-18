@@ -358,7 +358,17 @@ if(p.startsWith('/api/transactions/') && ['GET','PUT','DELETE'].includes(method)
  try{await db.batch(stmts)}catch(e){return json({error:'REVERSAL_REJECTED',hint:'Contrepassation impossible (solde insuffisant, compte ou client bloqué). Aucun mouvement partiel enregistré.'},409)}
  await audit(db,u,'TRANSACTION_REVERSED',tx.reference+' => '+ref);return json({ok:true,reference:ref});
 }
-if(p==='/api/transactions'&&method==='GET'){if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);const page=Math.min(1000,Math.max(1,Number(url.searchParams.get('page')||1)));const rows=await db.prepare('SELECT t.id,t.reference,t.kind,t.amount,t.delta,t.created_at,a.number account FROM transactions t JOIN accounts a ON a.id=t.account_id WHERE t.institution_id=? ORDER BY t.created_at DESC,t.id DESC LIMIT 21 OFFSET ?').bind(u.institution_id,(page-1)*20).all();return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page})}
+if(p==='/api/transactions'&&method==='GET'){
+ if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);
+ const page=Math.min(1000,Math.max(1,Number(url.searchParams.get('page')||1)));
+ const q=(url.searchParams.get('q')||'').trim().slice(0,100);
+ const where="t.institution_id=?"+(q?" AND (t.reference LIKE ? OR a.number LIKE ? OR c.name LIKE ? OR c.phone LIKE ? OR t.kind LIKE ? OR t.description LIKE ? OR t.created_at LIKE ? OR CAST(t.amount AS TEXT) LIKE ?)":'');
+ const params=[u.institution_id,...(q?Array(8).fill('%'+q+'%'):[])];
+ const base=' FROM transactions t JOIN accounts a ON a.id=t.account_id JOIN clients c ON c.id=a.client_id WHERE '+where;
+ const count=await db.prepare('SELECT COUNT(*) AS total'+base).bind(...params).first();
+ const rows=await db.prepare('SELECT t.id,t.reference,t.kind,t.amount,t.delta,t.created_at,t.description,a.number account,c.name client'+base+' ORDER BY t.created_at DESC,t.id DESC LIMIT 21 OFFSET ?').bind(...params,(page-1)*20).all();
+ return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page,total:count.total});
+}
 if(p==='/api/transactions'&&method==='POST'){
  if(!writable(u,'transactions'))return json({error:'FORBIDDEN'},403);if(!['DEPOSIT','WITHDRAWAL','TRANSFER'].includes(body.kind)||!money(body.amount)||!within(body.operation_key,100))return json({error:'INVALID_TRANSACTION'},400);
  const source=await db.prepare('SELECT a.id FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.id=? AND a.institution_id=? AND a.status=? AND c.active=1').bind(body.account_id,u.institution_id,'ACTIVE').first();if(!source)return json({error:'ACCOUNT_NOT_FOUND'},404);
