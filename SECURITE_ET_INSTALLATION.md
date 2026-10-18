@@ -1,4 +1,4 @@
-# MEGA BANK — Entreprise + administrateur sécurisé
+# ASSOCIATION OUKAMI DE DIABO — Entreprise + administrateur sécurisé
 
 Dans **Super Admin → Entreprises → + Nouvelle entreprise**, remplir entreprise, nom administrateur principal et e-mail. Une seule opération D1 `db.batch` crée les deux enregistrements ; si la création du compte échoue, l'entreprise n'est pas créée. Le rôle `admin` est rattaché à `institution_id`.
 

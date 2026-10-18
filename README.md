@@ -1,4 +1,4 @@
-# MEGA BANK — nouveau socle Cloudflare/GitHub
+# ASSOCIATION OUKAMI DE DIABO — nouveau socle Cloudflare/GitHub
 
 **Statut : socle fonctionnel partiel / non homologué pour la production bancaire.** Projet créé de zéro à partir du cahier des charges fourni, sans code provenant des anciens projets.
 
@@ -12,7 +12,7 @@ Crédits et échéanciers, pénalités, comptabilité en partie double, gestion 
 
 ## Installer
 1. Pousser ce dossier dans un **nouveau** dépôt GitHub (sans mélanger les anciens projets).
-2. Dans Cloudflare Pages, créer un nouveau projet et relier ce dépôt. Configurer `DB` comme D1 et `CACHE` comme KV (identifiants déjà déclarés dans `wrangler.toml`). Attention : la base et le KV déclarés doivent être réservés à MEGA BANK.
+2. Dans Cloudflare Pages, créer un nouveau projet et relier ce dépôt. Configurer `DB` comme D1 et `CACHE` comme KV (identifiants déjà déclarés dans `wrangler.toml`). Attention : la base et le KV déclarés doivent être réservés à ASSOCIATION OUKAMI DE DIABO.
 3. Appliquer `migrations/0001_initial.sql` sur la base D1 : `npx wrangler d1 execute mega_bank_db --remote --file=migrations/0001_initial.sql` (après vérification de la base cible). **Ne jamais appliquer cette migration sur une base contenant les données d'un autre projet.**
 4. Sur votre terminal de confiance, générer l'instruction de création du superadmin : `node scripts/bootstrap-admin.mjs mega@services.local 'CHOISIR_UN_MOT_DE_PASSE_FORT'` puis exécuter le SQL produit dans D1. Le mot de passe initial du cahier des charges n'est volontairement pas intégré au dépôt ; changez-le dès la première connexion.
 5. Déployer depuis GitHub / Cloudflare Pages. L'administrateur doit créer une institution, puis un administrateur bancaire pour celle-ci.
@@ -32,7 +32,7 @@ Créer des ressources Cloudflare dédiées, activer MFA, permissions métier exh
 
 ## Diagnostic de connexion (correction SERVER_ERROR)
 
-Le message `SERVER_ERROR` est une réponse générique : il ne prouve **pas** que le mot de passe est faux. Le projet exige un schéma MEGA BANK initialisé et un Super Admin créé dans **la même base D1 que celle reliée au projet Pages**.
+Le message `SERVER_ERROR` est une réponse générique : il ne prouve **pas** que le mot de passe est faux. Le projet exige un schéma ASSOCIATION OUKAMI DE DIABO initialisé et un Super Admin créé dans **la même base D1 que celle reliée au projet Pages**.
 
 1. Créer idéalement une **nouvelle base D1 dédiée** et un **KV dédié**, sans réutiliser une base d'un autre projet, puis adapter leurs identifiants dans `wrangler.toml`.
 2. Dans Cloudflare Pages → Settings → Bindings, lier la nouvelle base sous le nom exact `DB` et le KV sous `CACHE`, pour la production et pour les environnements de prévisualisation concernés. Relancer le déploiement.
@@ -50,7 +50,7 @@ Le fichier `wrangler.toml` utilise `mega_bank_db` (D1) et `mega_bank_kv` (KV), a
 **Initialisation sur la nouvelle D1 vide uniquement** : `npx wrangler d1 execute mega_bank_db --remote --file=migrations/0001_initial.sql`. Ensuite créer le Super Admin avec `scripts/bootstrap-admin.mjs` suivant les instructions ci-dessus. Ne pas stocker le mot de passe ou le SQL généré dans GitHub. Tester `/api/setup-status` après déploiement.
 
 
-## NOUVEAU : Initialisation guidée du Super Admin MEGA BANK
+## NOUVEAU : Initialisation guidée du Super Admin ASSOCIATION OUKAMI DE DIABO
 
 Compte unique à créer : **mega@services.local**. Le mot de passe est choisi au moment de l'installation ; il ne figure ni dans le ZIP ni sur GitHub.
 

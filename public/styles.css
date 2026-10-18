@@ -144,7 +144,7 @@
   .auth .access-options label{min-width:140px;padding:10px}
 }
 
-/* MEGA BANK – Connexion soignée : trois choix dans le cadre, sans scroll horizontal. */
+/* ASSOCIATION OUKAMI DE DIABO – Connexion soignée : trois choix dans le cadre, sans scroll horizontal. */
 .auth{padding:18px}
 .auth .login{width:min(560px,calc(100vw - 24px));padding:28px clamp(18px,4vw,34px) 25px;gap:0}
 .auth .login-badge{margin-bottom:12px}
@@ -203,3 +203,10 @@
 .enterprise-panel{margin-top:20px;padding:22px}.enterprise-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;align-items:end;gap:12px}.enterprise-form label{min-width:0}.enterprise-form button{margin-bottom:12px}@media(max-width:920px){.enterprise-form{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.enterprise-form{grid-template-columns:1fr}}
 
 #modal:has(.contract-form-grid){width:min(1100px,96vw);max-height:94dvh}.contract-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px}.contract-form-grid[hidden]{display:none!important}.contract-form-grid label{min-width:0}.contract-warning{grid-column:1/-1}@media(max-width:640px){.contract-form-grid{grid-template-columns:1fr}}
+
+/* Identité longue : nom visible en entier, sans débordement sur mobile */
+.brand{white-space:normal;letter-spacing:.3px;line-height:1.2;font-size:clamp(15px,1.65vw,21px)}
+.login .brand{font-size:clamp(19px,3.5vw,23px)}
+.auth .brand{justify-content:center;text-align:center}
+header .brand{max-width:340px;min-width:0;overflow-wrap:anywhere}
+@media(max-width:680px){header .brand{max-width:100%;font-size:16px}}
