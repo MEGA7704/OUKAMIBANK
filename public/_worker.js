@@ -301,6 +301,37 @@ if(p.startsWith('/api/accounts/')&&p.endsWith('/status')&&method==='POST'){
  }
  return json({ok:true});
 }
+// Compte entreprise indépendant : approvisionnement / décaissement uniquement.
+if(p==='/api/enterprise-treasury'&&method==='GET'){
+ if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+ const bank=u.institution_id;
+ const [summary,entries]=await db.batch([
+  db.prepare('SELECT balance FROM enterprise_treasury WHERE institution_id=?').bind(bank),
+  db.prepare('SELECT id,kind,amount,balance_after,description,created_at FROM enterprise_treasury_entries WHERE institution_id=? ORDER BY created_at DESC,id DESC LIMIT 30').bind(bank)
+ ]);
+ return json({balance:Number(summary.results[0]?.balance||0),entries:entries.results});
+}
+if(p==='/api/enterprise-treasury'&&method==='POST'){
+ if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+ if(!['SUPPLY','DISBURSEMENT'].includes(body.kind)||!money(body.amount)||!within(body.operation_key,100)||typeof body.description!=='string'||body.description.length>500)return json({error:'INVALID_ENTERPRISE_OPERATION'},400);
+ const bank=u.institution_id;
+ const previous=await db.prepare('SELECT id FROM enterprise_treasury_entries WHERE institution_id=? AND operation_key=?').bind(bank,body.operation_key).first();
+ if(previous)return json({ok:true,duplicate:true});
+ // Compute a candidate after-balance; trigger enforces the actual balance atomically.
+ const record=await db.prepare('SELECT balance FROM enterprise_treasury WHERE institution_id=?').bind(bank).first();
+ const balance=Number(record?.balance||0), next=balance+(body.kind==='SUPPLY'?body.amount:-body.amount);
+ if(!Number.isSafeInteger(next)||next<0)return json({error:'INSUFFICIENT_ENTERPRISE_FUNDS'},409);
+ try{
+  await db.prepare('INSERT INTO enterprise_treasury_entries(id,institution_id,operation_key,kind,amount,balance_after,description,created_by) VALUES(?,?,?,?,?,?,?,?)').bind(id(),bank,body.operation_key,body.kind,body.amount,next,body.description.trim(),u.id).run();
+ }catch(e){
+  if(await db.prepare('SELECT id FROM enterprise_treasury_entries WHERE institution_id=? AND operation_key=?').bind(bank,body.operation_key).first())return json({ok:true,duplicate:true});
+  const err=String(e);
+  if(/INSUFFICIENT_ENTERPRISE_FUNDS|INVALID_ENTERPRISE_BALANCE/.test(err))return json({error:'BALANCE_CHANGED_RETRY'},409);
+  return json({error:'ENTERPRISE_OPERATION_FAILED'},409);
+ }
+ await audit(db,u,'ENTERPRISE_'+body.kind,body.operation_key);
+ return json({ok:true},201);
+}
 if(p==='/api/accounts'&&method==='GET'){
  if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);
  const page=Math.min(10000,Math.max(1,Number(url.searchParams.get('page')||1)));
@@ -316,7 +347,16 @@ if(p==='/api/accounts'&&method==='GET'){
  ]);
  return json({items:rows.results.slice(0,15),has_more:rows.results.length>15,page,total:Number(total.results[0]?.n||0)});
 }
-if(p==='/api/accounts'&&method==='POST'){if(u.role!=='admin')return json({error:'FORBIDDEN'},403);if(!['CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION'].includes(body.kind))return json({error:'INVALID_ACCOUNT_TYPE'},400);let customId=null;if(body.account_type_id){const t=await db.prepare('SELECT id,base_kind FROM account_types WHERE id=? AND institution_id=? AND active=1').bind(body.account_type_id,u.institution_id).first();if(!t||t.base_kind!==body.kind)return json({error:'INVALID_CUSTOM_ACCOUNT_TYPE'},400);customId=t.id;}const client=await db.prepare('SELECT id FROM clients WHERE id=? AND institution_id=? AND active=1').bind(body.client_id,u.institution_id).first();if(!client)return json({error:'CLIENT_NOT_FOUND'},404);const key=id(),no='MB-'+key.slice(0,12).toUpperCase();await db.prepare('INSERT INTO accounts(id,institution_id,client_id,number,kind,account_type_id) VALUES(?,?,?,?,?,?)').bind(key,u.institution_id,body.client_id,no,body.kind,customId).run();await audit(db,u,'ACCOUNT_CREATED',key);return json({ok:true,id:key,number:no},201)}
+if(p==='/api/accounts'&&method==='POST'){if(u.role!=='admin')return json({error:'FORBIDDEN'},403);if(!['CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION'].includes(body.kind))return json({error:'INVALID_ACCOUNT_TYPE'},400);let customId=null;if(body.account_type_id){const t=await db.prepare('SELECT id,base_kind FROM account_types WHERE id=? AND institution_id=? AND active=1').bind(body.account_type_id,u.institution_id).first();if(!t||t.base_kind!==body.kind)return json({error:'INVALID_CUSTOM_ACCOUNT_TYPE'},400);customId=t.id;}const client=await db.prepare('SELECT id FROM clients WHERE id=? AND institution_id=? AND active=1').bind(body.client_id,u.institution_id).first();if(!client)return json({error:'CLIENT_NOT_FOUND'},404);const key=id(),no='MB-'+key.slice(0,12).toUpperCase();const terms=body.terms||{};
+const amountKeys=body.kind==='CREDIT'?['principal','application_fee','book_fee']:body.kind==='TERM'?['principal','application_fee']:['initial_deposit','opening_fee','book_fee'];
+const allowedKeys=[...amountKeys,'annual_rate','rate','months','start_date','credit_type','funding_reference','penalty_rate','bonus_rate'];
+if(typeof terms!=='object'||Array.isArray(terms)||!terms||Object.keys(terms).some(k=>!allowedKeys.includes(k)))return json({error:'INVALID_ACCOUNT_TERMS'},400);
+for(const k of amountKeys){const v=Number(terms[k]||0);if(!Number.isSafeInteger(v)||v<0||v>1000000000000)return json({error:'INVALID_ACCOUNT_TERMS'},400)}
+for(const k of ['annual_rate','rate','bonus_rate','penalty_rate'])if(terms[k]!==undefined&&(!Number.isFinite(Number(terms[k]))||Number(terms[k])<0||Number(terms[k])>100))return json({error:'INVALID_ACCOUNT_RATE'},400);
+if(['CREDIT','TERM'].includes(body.kind)&&(!money(Number(terms.principal))||!Number.isInteger(Number(terms.months))||Number(terms.months)<1||Number(terms.months)>600))return json({error:'INVALID_CONTRACT_TERMS'},400);
+if(terms.start_date&&!/^\d{4}-\d{2}-\d{2}$/.test(terms.start_date))return json({error:'INVALID_CONTRACT_DATE'},400);
+// Les conditions sont des brouillons. Aucun décaissement ni frais ni dépôt n'est comptabilisé ici.
+await db.batch([db.prepare('INSERT INTO accounts(id,institution_id,client_id,number,kind,account_type_id) VALUES(?,?,?,?,?,?)').bind(key,u.institution_id,body.client_id,no,body.kind,customId),db.prepare('INSERT INTO account_contract_drafts(account_id,institution_id,kind,terms_json) VALUES(?,?,?,?)').bind(key,u.institution_id,body.kind,JSON.stringify(terms))]);await audit(db,u,'ACCOUNT_DRAFT_CREATED',key);return json({ok:true,id:key,number:no,draft:true},201)}
 if(p.startsWith('/api/accounts/') && ['GET','DELETE'].includes(method)){
  const accountId=decodeURIComponent(p.slice('/api/accounts/'.length));
  const a=await db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,a.block_reason,COALESCE(t.label,a.kind) type_label,c.name client FROM accounts a JOIN clients c ON c.id=a.client_id LEFT JOIN account_types t ON t.id=a.account_type_id WHERE a.id=? AND a.institution_id=?').bind(accountId,u.institution_id).first();

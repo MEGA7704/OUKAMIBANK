@@ -199,3 +199,7 @@
 #app:has(a[data-page="transactions"].active) .tablebox th{text-align:center}
 #app:has(a[data-page="transactions"].active) .tablebox td:nth-child(7){text-align:right;font-weight:750;white-space:nowrap}
 @media print{#app:has(a[data-page="transactions"].active) header,#app:has(a[data-page="transactions"].active) footer,#app:has(a[data-page="transactions"].active) .movement-toolbar,#app:has(a[data-page="transactions"].active) .pager,#app:has(a[data-page="transactions"].active) .row-actions{display:none!important}}
+
+.enterprise-panel{margin-top:20px;padding:22px}.enterprise-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) auto;align-items:end;gap:12px}.enterprise-form label{min-width:0}.enterprise-form button{margin-bottom:12px}@media(max-width:920px){.enterprise-form{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.enterprise-form{grid-template-columns:1fr}}
+
+#modal:has(.contract-form-grid){width:min(1100px,96vw);max-height:94dvh}.contract-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px}.contract-form-grid[hidden]{display:none!important}.contract-form-grid label{min-width:0}.contract-warning{grid-column:1/-1}@media(max-width:640px){.contract-form-grid{grid-template-columns:1fr}}
