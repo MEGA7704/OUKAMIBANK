@@ -230,6 +230,21 @@ if(p.startsWith('/api/reports/') && u.institution_id && ['admin','auditor'].incl
  }
  return json({error:'NOT_FOUND'},404);
 }
+// Synthèse transversale en lecture seule : chaque indicateur conserve sa nature comptable.
+// Les montants ci-dessous sont calculés dans D1, jamais à partir des listes paginées.
+if(p==='/api/financial/overview'&&method==='GET'){
+ if(!u.institution_id||!['admin','auditor'].includes(u.role))return json({error:'FORBIDDEN'},403);
+ const bank=u.institution_id;
+ const [accounts,clients,flows,treasury,obligations,drafts]=await db.batch([
+  db.prepare("SELECT COUNT(*) total,COALESCE(SUM(balance),0) balances FROM accounts WHERE institution_id=? AND status='ACTIVE'").bind(bank),
+  db.prepare('SELECT COUNT(*) total FROM clients WHERE institution_id=? AND active=1').bind(bank),
+  db.prepare("SELECT COALESCE(SUM(CASE WHEN kind='DEPOSIT' THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN kind='WITHDRAWAL' THEN amount ELSE 0 END),0) withdrawals,COUNT(*) movements FROM transactions WHERE institution_id=?").bind(bank),
+  db.prepare('SELECT balance FROM enterprise_treasury WHERE institution_id=?').bind(bank),
+  db.prepare('SELECT COUNT(*) total,COALESCE(SUM(amount),0) fixed_total FROM monthly_obligations WHERE institution_id=? AND active=1').bind(bank),
+  db.prepare("SELECT kind,COUNT(*) total FROM account_contract_drafts WHERE institution_id=? AND status='DRAFT' GROUP BY kind").bind(bank)
+ ]);
+ return json({institution_id:bank,clients_active:Number(clients.results[0]?.total||0),accounts_active:Number(accounts.results[0]?.total||0),client_account_balances:Number(accounts.results[0]?.balances||0),deposits_recorded:Number(flows.results[0]?.deposits||0),withdrawals_recorded:Number(flows.results[0]?.withdrawals||0),movement_count:Number(flows.results[0]?.movements||0),enterprise_cash_balance:Number(treasury.results[0]?.balance||0),monthly_fixed_obligations:Number(obligations.results[0]?.fixed_total||0),monthly_obligations_count:Number(obligations.results[0]?.total||0),contract_drafts:drafts.results,revenue_classification_available:false,note:'Les soldes clients, la trésorerie entreprise et les obligations sont des indicateurs distincts et ne doivent pas être additionnés.'});
+}
 if(p==='/api/dashboard'&&method==='GET'){
  if(u.role==='superadmin'){const [x,m,plans]=await db.batch([db.prepare('SELECT COUNT(*) total FROM institutions'),db.prepare('SELECT COUNT(*) total FROM users WHERE role<>?').bind('superadmin'),db.prepare(`SELECT s.plan_code,COUNT(*) n FROM subscriptions s JOIN (SELECT institution_id,MAX(rowid) rid FROM subscriptions GROUP BY institution_id) latest ON latest.rid=s.rowid GROUP BY s.plan_code`)]);const stats={institutions:x.results[0].total,members:m.results[0].total,FREE:0,STANDARD:0,BUSINESS:0,ULTIMATE:0};for(const row of plans.results)if(Object.hasOwn(stats,row.plan_code))stats[row.plan_code]=row.n;stats.no_plan=Math.max(0,stats.institutions-(stats.FREE+stats.STANDARD+stats.BUSINESS+stats.ULTIMATE));return json(stats)}
  const [c,a,b,t]=await db.batch([db.prepare('SELECT COUNT(*) n FROM clients WHERE institution_id=?').bind(u.institution_id),db.prepare('SELECT COUNT(*) n,COALESCE(SUM(balance),0) total FROM accounts WHERE institution_id=? AND status=?').bind(u.institution_id,'ACTIVE'),db.prepare('SELECT COALESCE(SUM(CASE WHEN delta>0 THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN delta<0 THEN amount ELSE 0 END),0) withdrawals FROM transactions WHERE institution_id=?').bind(u.institution_id),db.prepare('SELECT COUNT(*) n FROM transactions WHERE institution_id=?').bind(u.institution_id)]);
