@@ -171,3 +171,17 @@
  .auth .disabled-option small{font-size:9px}
  .auth .access-options input{flex-basis:12px;width:12px;height:12px}
 }
+
+/* Paramètres bancaires */
+.settings-tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px;padding:8px;background:#e9f2ed;border-radius:13px}
+.settings-tabs button{background:#fff;color:#1c4b39;border:1px solid #d4e4d9;flex:1 1 170px}
+.settings-tabs button.selected{background:#175044;color:#fff}
+.settings-panel{padding:24px;min-width:0}
+.settings-heading{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+.profile-card{background:#f9fcfa;border:1px solid #d9e7dc;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:6px;min-width:0;overflow-wrap:anywhere}
+.profile-card small{color:#678074}.profile-card strong{font-size:15px}
+.settings-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(195px,1fr));gap:4px 16px}
+.settings-panel textarea{width:100%;box-sizing:border-box;resize:vertical;font:inherit;line-height:1.6;padding:15px;border:1px solid #c9ddd0;border-radius:12px}
+.subscription-progress{height:12px;border-radius:20px;overflow:hidden;background:#e3eee6;margin:20px 0}.subscription-progress div{height:100%;background:#1d6e54}
+.settings-panel .tablebox th:last-child,.settings-panel .tablebox td:last-child{text-align:center}
+@media(max-width:620px){.settings-panel{padding:14px}.settings-tabs{display:grid;grid-template-columns:1fr 1fr}.settings-tabs button{font-size:12px;padding:9px}}

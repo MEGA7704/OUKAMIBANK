@@ -115,6 +115,74 @@ if(method!=='GET'&&method!=='HEAD') {const token=req.headers.get('x-csrf-token')
 if(p==='/api/me'&&method==='GET')return json({user:{id:u.id,name:u.display_name,email:u.email,role:u.role,institution_id:u.institution_id},force_password_change:!!u.force_password_change});
 if(p==='/api/password'&&method==='POST') {if(!within(body.current,256)||!within(body.next,256)||body.next.length<12)return json({error:'PASSWORD_REQUIREMENTS'},400);const old=await db.prepare('SELECT password_hash,password_salt,password_iterations FROM users WHERE id=?').bind(u.id).first();if(!eq(await pbkdf(body.current,old.password_salt,old.password_iterations),old.password_hash))return json({error:'BAD_CURRENT_PASSWORD'},403);const salt=hex(crypto.getRandomValues(new Uint8Array(16))),ph=await pbkdf(body.next,salt,NEW_PASSWORD_ITERATIONS);await db.batch([db.prepare('UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,session_version=session_version+1,force_password_change=0 WHERE id=?').bind(ph,salt,NEW_PASSWORD_ITERATIONS,u.id),db.prepare('DELETE FROM sessions WHERE user_id=?').bind(u.id)]);await audit(db,u,'PASSWORD_CHANGED','');return json({ok:true},200,{'set-cookie':cookie('',0)})}
 if(u.force_password_change)return json({error:'CHANGE_PASSWORD_REQUIRED'},403);
+// Banque : Paramètres indépendants par institution.
+if(p.startsWith('/api/settings/') && u.institution_id && ['admin','teller','auditor'].includes(u.role)){
+ const bank=u.institution_id, administrator=u.role==='admin';
+ if(p==='/api/settings/profile'&&method==='GET'){
+  const institution=await db.prepare('SELECT id,name,created_at FROM institutions WHERE id=?').bind(bank).first();
+  const profile=await db.prepare('SELECT * FROM bank_profiles WHERE institution_id=?').bind(bank).first();
+  return json({institution,profile:profile||{}});
+ }
+ if(p==='/api/settings/profile'&&method==='POST'){
+  if(!administrator)return json({error:'FORBIDDEN'},403);
+  const keys=['slogan','responsible','phone','email','address','city','country','currency','primary_color','secondary_color','footer_text','legal_notice','logo_data'];
+  const vals=keys.map(k=>String(body[k]||'').trim());
+  if(!within(body.name,160)||vals.some((v,i)=>v.length>(keys[i]==='logo_data'?70000:keys[i]==='legal_notice'?3000:400)))return json({error:'INVALID_PROFILE'},400);
+  if(!/^#[0-9a-fA-F]{6}$/.test(body.primary_color)||!/^#[0-9a-fA-F]{6}$/.test(body.secondary_color))return json({error:'INVALID_COLOR'},400);
+  if(body.logo_data&&!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(body.logo_data))return json({error:'INVALID_LOGO'},400);
+  await db.batch([
+   db.prepare('UPDATE institutions SET name=? WHERE id=?').bind(String(body.name).trim(),bank),
+   db.prepare(`INSERT INTO bank_profiles(institution_id,${keys.join(',')},updated_at) VALUES(${Array(keys.length+1).fill('?').join(',')},CURRENT_TIMESTAMP) ON CONFLICT(institution_id) DO UPDATE SET ${keys.map(k=>k+'=excluded.'+k).join(',')},updated_at=CURRENT_TIMESTAMP`).bind(bank,...vals)
+  ]);
+  await audit(db,u,'BANK_PROFILE_UPDATED',bank);return json({ok:true});
+ }
+ if(p==='/api/settings/subscription'&&method==='GET'){
+  const subscription=await db.prepare('SELECT s.plan_code,s.start_at,s.end_at,s.created_by,p.price,p.duration_days FROM subscriptions s JOIN plans p ON p.code=s.plan_code WHERE s.institution_id=? ORDER BY s.rowid DESC LIMIT 1').bind(bank).first();
+  const institution=await db.prepare('SELECT name,created_at FROM institutions WHERE id=?').bind(bank).first();
+  const plans=await db.prepare('SELECT code,price,duration_days FROM plans ORDER BY price').all();
+  return json({subscription,institution,plans:plans.results});
+ }
+ if(p==='/api/settings/users'&&method==='GET'){
+  if(!administrator)return json({error:'FORBIDDEN'},403);
+  const rows=await db.prepare('SELECT id,display_name,email,role,active,created_at FROM users WHERE institution_id=? ORDER BY created_at DESC LIMIT 200').bind(bank).all();return json({items:rows.results});
+ }
+ if(p==='/api/settings/users'&&method==='POST'){
+  if(!administrator)return json({error:'FORBIDDEN'},403);
+  const email=String(body.email||'').trim().toLowerCase(),name=String(body.name||'').trim(),password=String(body.password||''),role=String(body.role||'');
+  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||!within(name,160)||password.length<12||password.length>256||!['teller','auditor'].includes(role))return json({error:'INVALID_USER'},400);
+  const salt=hex(crypto.getRandomValues(new Uint8Array(16))),digest=await pbkdf(password,salt,NEW_PASSWORD_ITERATIONS);
+  try{await db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) VALUES(?,?,?,?,?,?,?,?,1,0)').bind(id(),bank,email,name,role,digest,salt,NEW_PASSWORD_ITERATIONS).run()}catch(e){if(/UNIQUE/i.test(String(e)))return json({error:'EMAIL_ALREADY_USED'},409);throw e}
+  await audit(db,u,'AGENT_CREATED',email);return json({ok:true},201);
+ }
+ if(p==='/api/settings/users/status'&&method==='POST'){
+  if(!administrator)return json({error:'FORBIDDEN'},403);
+  const target=await db.prepare("SELECT id,active FROM users WHERE id=? AND institution_id=? AND role IN ('teller','auditor')").bind(body.id,bank).first();if(!target)return json({error:'AGENT_NOT_FOUND'},404);
+  await db.batch([db.prepare('UPDATE users SET active=?,session_version=session_version+1 WHERE id=? AND institution_id=?').bind(body.active?1:0,target.id,bank),db.prepare('DELETE FROM sessions WHERE user_id=?').bind(target.id)]);
+  await audit(db,u,'AGENT_STATUS_CHANGED',target.id);return json({ok:true});
+ }
+ if(p==='/api/settings/users/reset'&&method==='POST'){
+  if(!administrator)return json({error:'FORBIDDEN'},403);
+  const target=await db.prepare("SELECT id FROM users WHERE id=? AND institution_id=? AND role IN ('teller','auditor')").bind(body.id,bank).first();
+  if(!target)return json({error:'AGENT_NOT_FOUND'},404);
+  const current=String(body.admin_password||''),next=String(body.next_password||'');
+  if(current.length>256||next.length<12||next.length>256)return json({error:'PASSWORD_REQUIREMENTS'},400);
+  const own=await db.prepare('SELECT password_hash,password_salt,password_iterations FROM users WHERE id=?').bind(u.id).first();
+  if(!eq(await pbkdf(current,own.password_salt,own.password_iterations),own.password_hash))return json({error:'BAD_CURRENT_PASSWORD'},403);
+  const salt=hex(crypto.getRandomValues(new Uint8Array(16))),digest=await pbkdf(next,salt,NEW_PASSWORD_ITERATIONS);
+  await db.batch([db.prepare('UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,session_version=session_version+1 WHERE id=? AND institution_id=?').bind(digest,salt,NEW_PASSWORD_ITERATIONS,target.id,bank),db.prepare('DELETE FROM sessions WHERE user_id=?').bind(target.id)]);
+  await audit(db,u,'AGENT_PASSWORD_RESET',target.id);return json({ok:true});
+ }
+ if(p==='/api/settings/terms'&&method==='GET'){
+  const r=await db.prepare('SELECT body,updated_at FROM bank_membership_terms WHERE institution_id=?').bind(bank).first();return json({body:r?.body||'',updated_at:r?.updated_at||null});
+ }
+ if(p==='/api/settings/terms'&&method==='POST'){
+  if(!administrator)return json({error:'FORBIDDEN'},403);
+  const text=String(body.body||'');if(text.length>30000)return json({error:'DOCUMENT_TOO_LONG'},413);
+  await db.prepare('INSERT INTO bank_membership_terms(institution_id,body) VALUES(?,?) ON CONFLICT(institution_id) DO UPDATE SET body=excluded.body,updated_at=CURRENT_TIMESTAMP').bind(bank,text).run();
+  await audit(db,u,'TERMS_UPDATED',bank);return json({ok:true});
+ }
+ return json({error:'NOT_FOUND'},404);
+}
 if(p==='/api/dashboard'&&method==='GET'){
  if(u.role==='superadmin'){const [x,m,plans]=await db.batch([db.prepare('SELECT COUNT(*) total FROM institutions'),db.prepare('SELECT COUNT(*) total FROM users WHERE role<>?').bind('superadmin'),db.prepare(`SELECT s.plan_code,COUNT(*) n FROM subscriptions s JOIN (SELECT institution_id,MAX(rowid) rid FROM subscriptions GROUP BY institution_id) latest ON latest.rid=s.rowid GROUP BY s.plan_code`)]);const stats={institutions:x.results[0].total,members:m.results[0].total,FREE:0,STANDARD:0,BUSINESS:0,ULTIMATE:0};for(const row of plans.results)if(Object.hasOwn(stats,row.plan_code))stats[row.plan_code]=row.n;stats.no_plan=Math.max(0,stats.institutions-(stats.FREE+stats.STANDARD+stats.BUSINESS+stats.ULTIMATE));return json(stats)}
  const [c,a,b,t]=await db.batch([db.prepare('SELECT COUNT(*) n FROM clients WHERE institution_id=?').bind(u.institution_id),db.prepare('SELECT COUNT(*) n,COALESCE(SUM(balance),0) total FROM accounts WHERE institution_id=? AND status=?').bind(u.institution_id,'ACTIVE'),db.prepare('SELECT COALESCE(SUM(CASE WHEN delta>0 THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN delta<0 THEN amount ELSE 0 END),0) withdrawals FROM transactions WHERE institution_id=?').bind(u.institution_id),db.prepare('SELECT COUNT(*) n FROM transactions WHERE institution_id=?').bind(u.institution_id)]);

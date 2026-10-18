@@ -192,3 +192,11 @@ La fenêtre « Clients → Nouveau » occupe jusqu'à 1420 px en largeur sur ord
 - Blocage : le serveur et une contrainte D1 rejettent les mouvements sur tous les comptes du client bloqué, y compris la destination d'un virement.
 - Suppression définitive refusée si le client possède un compte, afin de conserver l'historique financier.
 - Base D1 déjà déployée : appliquer **une seule fois** `migrations/0003_client_block.sql` après sauvegarde. Ne pas relancer `0001_initial.sql`.
+
+## Paramètres V1 — Migration 0004 obligatoire
+
+Nouvelle section **Paramètres** (Profil banque, Mon abonnement, Demandes de mot de passe oublié, Gestion des utilisateurs et Conditions générales d’adhésion). Pour la base `mega_bank_db` existante, effectuer une sauvegarde, puis appliquer **une seule fois** `migrations/0004_settings.sql` dans D1 Console avant de déployer. Le fichier est idempotent (tables `IF NOT EXISTS`). Ne pas réexécuter `0001_initial.sql` sur des données réelles.
+
+Les API sont authentifiées, protégées par CSRF en écriture et limitées à l'institution de la session. L'administrateur banque peut modifier son profil, créer des agents caisse/auditeur, activer/désactiver ces agents, réinitialiser leur mot de passe après avoir confirmé le sien, et éditer le **texte** des conditions d'adhésion. Les administrateurs des banques ne peuvent pas réinitialiser un autre administrateur.
+
+**Limites à ne pas masquer** : l'éditeur des conditions utilise une zone de texte sécurisée et non encore un éditeur riche complet; ses variables client ne sont pas remplacées automatiquement lors de l'impression. Le module ne gère pas encore les demandes de récupération initiées par les agents, la personnalisation avancée des documents, une grille complète de permissions RBAC individuelles, ni les souscriptions payantes. Ces fonctions demandent des développements supplémentaires avant d'être décrites comme opérationnelles. L'image de logo peut être stockée en petite taille en D1, sans stockage R2. Faire valider sécurité, conformité, tests fonctionnels et mises en production avant usage bancaire réel.
