@@ -183,6 +183,53 @@ if(p.startsWith('/api/settings/') && u.institution_id && ['admin','teller','audi
  }
  return json({error:'NOT_FOUND'},404);
 }
+// Rapports OUKAMI : revenus non disponibles sans écritures classées officiellement.
+if(p.startsWith('/api/reports/') && u.institution_id && ['admin','auditor'].includes(u.role)){
+ const bank=u.institution_id;
+ const validDate=x=>/^\d{4}-\d{2}-\d{2}$/.test(x)&&!Number.isNaN(Date.parse(x));
+ if(p==='/api/reports/revenues'&&method==='GET'){
+  return json({available:false,reason:'Les transactions actuelles ne comportent pas de classification de revenu bancaire. Aucun bénéfice ne peut être déduit des dépôts et retraits.',categories:[],total:0});
+ }
+ if(p==='/api/reports/obligations'&&method==='GET'){
+  const r=await db.prepare('SELECT id,label,basis,service_code,amount,created_at FROM monthly_obligations WHERE institution_id=? AND active=1 ORDER BY label,id').bind(bank).all();
+  return json({items:r.results,total:r.results.reduce((s,x)=>s+x.amount,0)});
+ }
+ if(p==='/api/reports/obligations'&&method==='POST'){
+  if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+  const label=String(body.label||'').trim(),basis=String(body.basis||''),amount=Number(body.amount),service=String(body.service_code||'').trim();
+  if(!label||label.length>150||!['GENERAL','SERVICE'].includes(basis)||!Number.isSafeInteger(amount)||amount<0||amount>1e12||service.length>120||basis==='SERVICE'&&!service)return json({error:'INVALID_OBLIGATION'},400);
+  if(body.id){const existing=await db.prepare('SELECT id FROM monthly_obligations WHERE institution_id=? AND id=? AND active=1').bind(bank,body.id).first();if(!existing)return json({error:'NOT_FOUND'},404);
+   await db.prepare('UPDATE monthly_obligations SET label=?,basis=?,service_code=?,amount=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND institution_id=?').bind(label,basis,service,amount,body.id,bank).run();await audit(db,u,'OBLIGATION_UPDATED',body.id);
+  }else{const key=id();await db.prepare('INSERT INTO monthly_obligations(id,institution_id,label,basis,service_code,amount) VALUES(?,?,?,?,?,?)').bind(key,bank,label,basis,service,amount).run();await audit(db,u,'OBLIGATION_CREATED',key)}
+  return json({ok:true});
+ }
+ if(p==='/api/reports/obligations/delete'&&method==='POST'){
+  if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+  const item=await db.prepare('SELECT id FROM monthly_obligations WHERE id=? AND institution_id=? AND active=1').bind(body.id,bank).first();if(!item)return json({error:'NOT_FOUND'},404);
+  await db.prepare('UPDATE monthly_obligations SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=? AND institution_id=?').bind(item.id,bank).run();await audit(db,u,'OBLIGATION_DEACTIVATED',item.id);return json({ok:true});
+ }
+ if(p==='/api/reports/accounts-summary'&&method==='GET'){
+  const from=url.searchParams.get('from')||'',to=url.searchParams.get('to')||'';
+  if(!validDate(from)||!validDate(to)||from>to||Date.parse(to)-Date.parse(from)>366*86400000)return json({error:'INVALID_DATE_RANGE'},400);
+  const results=await db.prepare(`SELECT a.kind,COUNT(DISTINCT a.id) account_count,
+   COALESCE(SUM(CASE WHEN t.kind='DEPOSIT' THEN t.amount ELSE 0 END),0) deposits,
+   COALESCE(SUM(CASE WHEN t.kind='WITHDRAWAL' THEN t.amount ELSE 0 END),0) withdrawals
+   FROM accounts a LEFT JOIN transactions t ON t.account_id=a.id AND t.institution_id=a.institution_id AND t.created_at>=? AND t.created_at<?
+   WHERE a.institution_id=? GROUP BY a.kind ORDER BY a.kind`).bind(from+' 00:00:00',to+' 23:59:59.999',bank).all();
+  // COUNT DISTINCT avoids counting the same account once per transaction.
+  return json({items:results.results,from,to,notice:'Totaux dépôt/retrait sur la période ; les comptes CREDIT et TERM nécessitent leurs registres contractuels pour afficher une dette ou un placement.'});
+ }
+ if(p==='/api/reports/accounts-detail'&&method==='GET'){
+  const from=url.searchParams.get('from')||'',to=url.searchParams.get('to')||'',kind=url.searchParams.get('kind')||'';
+  const page=Math.min(10000,Math.max(1,Number(url.searchParams.get('page')||1)));
+  if(!validDate(from)||!validDate(to)||from>to||!['CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION'].includes(kind))return json({error:'INVALID_FILTER'},400);
+  const r=await db.prepare(`SELECT t.reference,t.created_at,t.kind,t.description,t.amount,a.number,c.name client
+   FROM transactions t JOIN accounts a ON a.id=t.account_id AND a.institution_id=t.institution_id JOIN clients c ON c.id=a.client_id AND c.institution_id=t.institution_id
+   WHERE t.institution_id=? AND a.kind=? AND t.created_at>=? AND t.created_at<? ORDER BY t.created_at DESC,t.id DESC LIMIT 21 OFFSET ?`)
+   .bind(bank,kind,from+' 00:00:00',to+' 23:59:59.999',(page-1)*20).all();return json({items:r.results.slice(0,20),has_more:r.results.length>20,page});
+ }
+ return json({error:'NOT_FOUND'},404);
+}
 if(p==='/api/dashboard'&&method==='GET'){
  if(u.role==='superadmin'){const [x,m,plans]=await db.batch([db.prepare('SELECT COUNT(*) total FROM institutions'),db.prepare('SELECT COUNT(*) total FROM users WHERE role<>?').bind('superadmin'),db.prepare(`SELECT s.plan_code,COUNT(*) n FROM subscriptions s JOIN (SELECT institution_id,MAX(rowid) rid FROM subscriptions GROUP BY institution_id) latest ON latest.rid=s.rowid GROUP BY s.plan_code`)]);const stats={institutions:x.results[0].total,members:m.results[0].total,FREE:0,STANDARD:0,BUSINESS:0,ULTIMATE:0};for(const row of plans.results)if(Object.hasOwn(stats,row.plan_code))stats[row.plan_code]=row.n;stats.no_plan=Math.max(0,stats.institutions-(stats.FREE+stats.STANDARD+stats.BUSINESS+stats.ULTIMATE));return json(stats)}
  const [c,a,b,t]=await db.batch([db.prepare('SELECT COUNT(*) n FROM clients WHERE institution_id=?').bind(u.institution_id),db.prepare('SELECT COUNT(*) n,COALESCE(SUM(balance),0) total FROM accounts WHERE institution_id=? AND status=?').bind(u.institution_id,'ACTIVE'),db.prepare('SELECT COALESCE(SUM(CASE WHEN delta>0 THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN delta<0 THEN amount ELSE 0 END),0) withdrawals FROM transactions WHERE institution_id=?').bind(u.institution_id),db.prepare('SELECT COUNT(*) n FROM transactions WHERE institution_id=?').bind(u.institution_id)]);

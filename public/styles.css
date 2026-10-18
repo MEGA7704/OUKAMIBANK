@@ -210,3 +210,5 @@
 .auth .brand{justify-content:center;text-align:center}
 header .brand{max-width:340px;min-width:0;overflow-wrap:anywhere}
 @media(max-width:680px){header .brand{max-width:100%;font-size:16px}}
+
+.report-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:16px 0}.report-tabs button{background:#e7f1eb;border:1px solid #bed4c6;color:#174634;font-weight:700;padding:14px 8px}.report-tabs .selected{background:#184b37;color:white}.report-obligation-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;margin-bottom:20px}.report-obligation-form .actions{grid-column:1/-1}.amount{text-align:right!important;font-variant-numeric:tabular-nums}@media(max-width:660px){.report-tabs{gap:4px}.report-tabs button{font-size:10px;padding:10px 3px}.report-obligation-form{grid-template-columns:1fr}}@media print{.report-tabs,.report-obligation-form,.report-filter,#printReport,.row-actions,.pager,#newBtn{display:none!important}#reportArea{box-shadow:none;border:0}.tablebox{overflow:visible}}
