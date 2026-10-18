@@ -200,3 +200,11 @@ Nouvelle section **Paramètres** (Profil banque, Mon abonnement, Demandes de mot
 Les API sont authentifiées, protégées par CSRF en écriture et limitées à l'institution de la session. L'administrateur banque peut modifier son profil, créer des agents caisse/auditeur, activer/désactiver ces agents, réinitialiser leur mot de passe après avoir confirmé le sien, et éditer le **texte** des conditions d'adhésion. Les administrateurs des banques ne peuvent pas réinitialiser un autre administrateur.
 
 **Limites à ne pas masquer** : l'éditeur des conditions utilise une zone de texte sécurisée et non encore un éditeur riche complet; ses variables client ne sont pas remplacées automatiquement lors de l'impression. Le module ne gère pas encore les demandes de récupération initiées par les agents, la personnalisation avancée des documents, une grille complète de permissions RBAC individuelles, ni les souscriptions payantes. Ces fonctions demandent des développements supplémentaires avant d'être décrites comme opérationnelles. L'image de logo peut être stockée en petite taille en D1, sans stockage R2. Faire valider sécurité, conformité, tests fonctionnels et mises en production avant usage bancaire réel.
+
+## Extension COMPTES V1 (2026-10-18)
+
+Voir `NOTICE_COMPTES_V1.md`. Appliquer sur une base existante la migration
+`migrations/0005_accounts_management.sql` **une fois seulement**, après sauvegarde.
+Cette extension ne met pas en service les calculs de crédits, échéanciers,
+intérêts, frais bancaires et placements rémunérés : ces modules nécessitent
+un registre comptable validé et ne sont pas inclus dans les fonctionnalités actives.

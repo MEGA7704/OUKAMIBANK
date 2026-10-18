@@ -185,3 +185,11 @@
 .subscription-progress{height:12px;border-radius:20px;overflow:hidden;background:#e3eee6;margin:20px 0}.subscription-progress div{height:100%;background:#1d6e54}
 .settings-panel .tablebox th:last-child,.settings-panel .tablebox td:last-child{text-align:center}
 @media(max-width:620px){.settings-panel{padding:14px}.settings-tabs{display:grid;grid-template-columns:1fr 1fr}.settings-tabs button{font-size:12px;padding:9px}}
+
+/* COMPTES : mise en page responsive sans pagination en navigateur */
+.account-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:15px 0}
+.account-controls .card{min-width:0;padding:20px}.account-controls strong{display:block;margin-bottom:11px;color:#164b3d;letter-spacing:.5px}
+.account-inline{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:10px}.account-inline input,.account-inline select{flex:1;min-width:170px;margin:0}
+.accounts-header h2{margin-bottom:4px}.accounts-table th{text-align:center;background:#06443c;color:white}.accounts-table .amount{text-align:right;font-variant-numeric:tabular-nums}.accounts-table td:last-child{text-align:center}
+@media(max-width:850px){.account-controls{grid-template-columns:1fr}.accounts-table th,.accounts-table td{padding:8px 6px;font-size:12px}}
+@media print{.account-controls,.pager,.accounts-table th:last-child,.accounts-table td:last-child{display:none!important}}

@@ -259,11 +259,67 @@ if(p.startsWith('/api/clients/') && ['GET','PUT','DELETE'].includes(method)){
  }
  return json({error:'INVALID_ACTION'},400);
 }
-if(p==='/api/accounts'&&method==='GET'){if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);const page=Math.min(100,Math.max(1,Number(url.searchParams.get('page')||1)));const rows=await db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,c.name client FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.institution_id=? ORDER BY a.created_at DESC,a.id DESC LIMIT 21 OFFSET ?').bind(u.institution_id,(page-1)*20).all();return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page})}
-if(p==='/api/accounts'&&method==='POST'){if(u.role!=='admin')return json({error:'FORBIDDEN'},403);if(!['CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION'].includes(body.kind))return json({error:'INVALID_ACCOUNT_TYPE'},400);const client=await db.prepare('SELECT id FROM clients WHERE id=? AND institution_id=? AND active=1').bind(body.client_id,u.institution_id).first();if(!client)return json({error:'CLIENT_NOT_FOUND'},404);const key=id(),no='MB-'+key.slice(0,12).toUpperCase();await db.prepare('INSERT INTO accounts(id,institution_id,client_id,number,kind) VALUES(?,?,?,?,?)').bind(key,u.institution_id,body.client_id,no,body.kind).run();await audit(db,u,'ACCOUNT_CREATED',key);return json({ok:true,id:key,number:no},201)}
+// Gestion des types par institution, sans changement des écritures historiques.
+if(p==='/api/account-types'&&method==='GET'){
+ if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);
+ const rows=await db.prepare('SELECT id,label,base_kind,active FROM account_types WHERE institution_id=? ORDER BY label').bind(u.institution_id).all();
+ return json({items:rows.results});
+}
+if(p==='/api/account-types'&&method==='POST'){
+ if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+ const label=String(body.label||'').trim();if(label.length<3||label.length>70)return json({error:'INVALID_ACCOUNT_TYPE_NAME'},400);
+ const exists=await db.prepare('SELECT id FROM account_types WHERE institution_id=? AND lower(label)=lower(?)').bind(u.institution_id,label).first();
+ if(exists)return json({error:'TYPE_ALREADY_EXISTS'},409);
+ const key=id();await db.prepare("INSERT INTO account_types(id,institution_id,label,base_kind) VALUES(?,?,?,'CURRENT')").bind(key,u.institution_id,label).run();
+ await audit(db,u,'ACCOUNT_TYPE_CREATED',key);return json({ok:true,id:key},201);
+}
+if(p.startsWith('/api/account-types/')&&method==='DELETE'){
+ if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+ const typeId=decodeURIComponent(p.slice('/api/account-types/'.length));
+ const target=await db.prepare('SELECT id FROM account_types WHERE id=? AND institution_id=? AND active=1').bind(typeId,u.institution_id).first();
+ if(!target)return json({error:'ACCOUNT_TYPE_NOT_FOUND'},404);
+ // Le type disparaît des choix mais reste en base pour préserver les comptes existants.
+ await db.prepare('UPDATE account_types SET active=0 WHERE id=? AND institution_id=?').bind(typeId,u.institution_id).run();
+ await audit(db,u,'ACCOUNT_TYPE_ARCHIVED',typeId);return json({ok:true});
+}
+if(p.startsWith('/api/accounts/')&&p.endsWith('/status')&&method==='POST'){
+ if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+ const accountId=decodeURIComponent(p.slice('/api/accounts/'.length,-'/status'.length));
+ const a=await db.prepare('SELECT id,number,status FROM accounts WHERE id=? AND institution_id=?').bind(accountId,u.institution_id).first();
+ if(!a)return json({error:'ACCOUNT_NOT_FOUND'},404);
+ const action=body.action;
+ if(!['block','unblock'].includes(action))return json({error:'INVALID_ACTION'},400);
+ if(action==='block'){
+  if(a.status==='CLOSED')return json({error:'CLOSED_ACCOUNT'},409);
+  const reason=String(body.reason||'').trim();if(reason.length<5||reason.length>500)return json({error:'BLOCK_REASON_REQUIRED'},400);
+  await db.prepare("UPDATE accounts SET status='BLOCKED',block_reason=? WHERE id=? AND institution_id=? AND status!='CLOSED'").bind(reason,accountId,u.institution_id).run();
+  await audit(db,u,'ACCOUNT_BLOCKED',accountId+': '+reason.slice(0,160));
+ }else{
+  if(a.status!=='BLOCKED')return json({error:'ACCOUNT_NOT_BLOCKED'},409);
+  await db.prepare("UPDATE accounts SET status='ACTIVE',block_reason=NULL WHERE id=? AND institution_id=? AND status='BLOCKED'").bind(accountId,u.institution_id).run();
+  await audit(db,u,'ACCOUNT_UNBLOCKED',accountId);
+ }
+ return json({ok:true});
+}
+if(p==='/api/accounts'&&method==='GET'){
+ if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);
+ const page=Math.min(10000,Math.max(1,Number(url.searchParams.get('page')||1)));
+ const search=String(url.searchParams.get('q')||'').trim().slice(0,100);
+ const kind=String(url.searchParams.get('kind')||'').trim().slice(0,80);
+ const filter=kind?' AND (a.kind=? OR a.account_type_id=?)':'';
+ const match=search?' AND (lower(a.number) LIKE ? OR lower(c.name) LIKE ?)':'';
+ const args=[u.institution_id,...(kind?[kind,kind]:[]),...(search?['%'+search.toLowerCase()+'%','%'+search.toLowerCase()+'%']:[])];
+ const base=' FROM accounts a JOIN clients c ON c.id=a.client_id LEFT JOIN account_types t ON t.id=a.account_type_id WHERE a.institution_id=?'+filter+match;
+ const [rows,total]=await db.batch([
+  db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,a.block_reason,COALESCE(t.label,a.kind) type_label,c.name client'+base+' ORDER BY a.created_at DESC,a.id DESC LIMIT 16 OFFSET ?').bind(...args,(page-1)*15),
+  db.prepare('SELECT COUNT(*) n'+base).bind(...args)
+ ]);
+ return json({items:rows.results.slice(0,15),has_more:rows.results.length>15,page,total:Number(total.results[0]?.n||0)});
+}
+if(p==='/api/accounts'&&method==='POST'){if(u.role!=='admin')return json({error:'FORBIDDEN'},403);if(!['CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION'].includes(body.kind))return json({error:'INVALID_ACCOUNT_TYPE'},400);let customId=null;if(body.account_type_id){const t=await db.prepare('SELECT id,base_kind FROM account_types WHERE id=? AND institution_id=? AND active=1').bind(body.account_type_id,u.institution_id).first();if(!t||t.base_kind!==body.kind)return json({error:'INVALID_CUSTOM_ACCOUNT_TYPE'},400);customId=t.id;}const client=await db.prepare('SELECT id FROM clients WHERE id=? AND institution_id=? AND active=1').bind(body.client_id,u.institution_id).first();if(!client)return json({error:'CLIENT_NOT_FOUND'},404);const key=id(),no='MB-'+key.slice(0,12).toUpperCase();await db.prepare('INSERT INTO accounts(id,institution_id,client_id,number,kind,account_type_id) VALUES(?,?,?,?,?,?)').bind(key,u.institution_id,body.client_id,no,body.kind,customId).run();await audit(db,u,'ACCOUNT_CREATED',key);return json({ok:true,id:key,number:no},201)}
 if(p.startsWith('/api/accounts/') && ['GET','DELETE'].includes(method)){
  const accountId=decodeURIComponent(p.slice('/api/accounts/'.length));
- const a=await db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,c.name client FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.id=? AND a.institution_id=?').bind(accountId,u.institution_id).first();
+ const a=await db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,a.block_reason,COALESCE(t.label,a.kind) type_label,c.name client FROM accounts a JOIN clients c ON c.id=a.client_id LEFT JOIN account_types t ON t.id=a.account_type_id WHERE a.id=? AND a.institution_id=?').bind(accountId,u.institution_id).first();
  if(!a)return json({error:'ACCOUNT_NOT_FOUND'},404);
  if(method==='GET'){
   const t=await db.prepare('SELECT reference,kind,amount,delta,description,created_at FROM transactions WHERE account_id=? AND institution_id=? ORDER BY created_at DESC,id DESC LIMIT 200').bind(accountId,u.institution_id).all();
