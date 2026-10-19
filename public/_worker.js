@@ -363,6 +363,22 @@ if(p.startsWith('/api/accounts/')&&p.endsWith('/status')&&method==='POST'){
  }
  return json({ok:true});
 }
+// V20 : le calcul officiel exige une ventilation des remboursements et une
+// affectation documentée des approvisionnements. Ces registres ne sont pas
+// présents dans les versions précédentes : ne pas inventer leurs montants.
+if(p==='/api/enterprise-balance-v20'&&method==='GET'){
+ if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
+ const bank=u.institution_id;
+ const counts=await db.prepare("SELECT kind,COALESCE(SUM(amount),0) total FROM enterprise_treasury_entries WHERE institution_id=? GROUP BY kind").bind(bank).all();
+ const totals=Object.fromEntries(counts.results.map(x=>[x.kind,Number(x.total)]));
+ const treasury=await db.prepare('SELECT balance FROM enterprise_treasury WHERE institution_id=?').bind(bank).first();
+ return json({formula:'S = Cr + Rb + Aa - D',official_available:false,
+  capital_repaid:null,bank_revenue:null,active_funding:null,
+  disbursements:totals.DISBURSEMENT||0, supplies_recorded:totals.SUPPLY||0,
+  legacy_treasury_balance:Number(treasury?.balance||0),
+  missing:['credit_principal_repayment_allocations','recognized_revenue_ledger','funding_allocations'],
+  warning:'Solde V20 non calculable tant que les remboursements de capital, revenus reconnus et affectations de financement ne sont pas enregistrés de façon vérifiable. Le solde historique n’est pas un solde V20.'});
+}
 // Compte entreprise indépendant : approvisionnement / décaissement uniquement.
 if(p==='/api/enterprise-treasury'&&method==='GET'){
  if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
