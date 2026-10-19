@@ -1,603 +1,1446 @@
-import { pbkdf2Sync } from 'node:crypto';
-const json=(o,s=200,h={})=>new Response(JSON.stringify(o),{status:s,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff',...h}});
-const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
-const rand=()=>crypto.randomUUID();
-const hash=async s=>hex(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)));
-// WebCrypto on Cloudflare Workers enforces a PBKDF2 iteration ceiling of 100,000.
-// Store the iteration count per user. Older records above that limit can still be
-// verified through node:crypto, but new records use the Workers-compatible value.
-const NEW_PASSWORD_ITERATIONS=100000;
-const pbkdf=async(pass,salt,iter)=>{
- if(!/^(?:[0-9a-f]{2}){16,}$/i.test(salt)||!Number.isInteger(iter)||iter<100000||iter>1000000)throw Error('INVALID_HASH_PARAMETERS');
- if(iter>100000)return pbkdf2Sync(pass,Buffer.from(salt,'hex'),iter,32,'sha256').toString('hex');
- const saltBytes=Uint8Array.from(salt.match(/.{2}/g),v=>parseInt(v,16));
- const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(pass),{name:'PBKDF2'},false,['deriveBits']);
- return hex(await crypto.subtle.deriveBits({name:'PBKDF2',salt:saltBytes,iterations:iter,hash:'SHA-256'},key,256));
-};
-const eq=(a,b)=>{if(typeof a!=='string'||typeof b!=='string'||a.length!==b.length)return false;let x=0;for(let i=0;i<a.length;i++)x|=a.charCodeAt(i)^b.charCodeAt(i);return x===0};
-const cookie=(value,max=28800)=>`mega_session=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${max}`;
-const cookies=req=>Object.fromEntries((req.headers.get('cookie')||'').split(';').map(x=>x.trim().split('=').slice(0,2)).filter(x=>x.length===2));
-const csp="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
-const allowedOrigin=req=>{let origin=req.headers.get('origin');return !origin||origin===new URL(req.url).origin};
-const money=v=>Number.isSafeInteger(v)&&v>0&&v<=1000000000000;
-const roles={clients:['admin','teller','auditor'],accounts:['admin','teller','auditor'],transactions:['admin','teller','auditor']};
-const writable=(u,area)=>u.role==='admin'||(u.role==='teller'&&area!=='institutions');
-const within=(x,max=160)=>typeof x==='string'&&x.trim().length>0&&x.length<=max;
-async function actor(req,db){const token=cookies(req).mega_session;if(!token||!/^[0-9a-f-]{36}$/.test(token))return null;const idh=await hash(token);const row=await db.prepare(`SELECT s.csrf_hash,s.expires_at,u.id,u.institution_id,u.email,u.display_name,u.role,u.active,u.force_password_change,i.active AS institution_active FROM sessions s JOIN users u ON s.user_id=u.id LEFT JOIN institutions i ON i.id=u.institution_id WHERE s.id_hash=?`).bind(idh).first();if(!row||!row.active||row.institution_id&&!row.institution_active||Date.parse(row.expires_at)<=Date.now())return null;return row}
-async function audit(db,u,action,detail){await db.prepare('INSERT INTO audit_logs(id,user_id,institution_id,action,detail) VALUES(?,?,?,?,?)').bind(rand(),u?.id||null,u?.institution_id||null,action,detail||'').run()}
-const id=()=>rand();
-// Bootstrap is restricted to a completely empty user table. Never repair or reset an existing administrator here.
-async function ensureInitialSuperAdmin(db,env){
- const email=String(env.SUPER_ADMIN_EMAIL||'').trim().toLowerCase();
- const password=env.SUPER_ADMIN_INITIAL_PASSWORD;
- const existing=await db.prepare('SELECT COUNT(*) AS n FROM users').first();
- if(Number(existing?.n)>0)return {state:'EXISTING_USERS'};
- if(!email)return {state:'MISSING_ADMIN_EMAIL'};
- if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return {state:'INVALID_ADMIN_EMAIL'};
- if(typeof password!=='string'||password.length<12||password.length>256)return {state:'MISSING_OR_INVALID_ADMIN_SECRET'};
- const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
- const ph=await pbkdf(password,salt,NEW_PASSWORD_ITERATIONS);
- const result=await db.prepare("INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) SELECT ?,NULL,?,'Super Administrateur','superadmin',?,?,?,1,1 WHERE NOT EXISTS (SELECT 1 FROM users)")
-  .bind(id(),email,ph,salt,NEW_PASSWORD_ITERATIONS).run();
- return {state:result.meta?.changes===1?'ADMIN_CREATED':'ADMIN_NOT_INSERTED'};
+const SESSION_TTL = 60 * 60 * 12;
+const PASSWORD_ITERATIONS = 100000;
+const MIN_PASSWORD_ITERATIONS = 100000;
+const MAX_PASSWORD_ITERATIONS = 100000;
+const LOGIN_WINDOW_SECONDS = 15 * 60;
+const LOGIN_BLOCK_SECONDS = 15 * 60;
+const LOGIN_ACCOUNT_LIMIT = 5;
+const LOGIN_IP_LIMIT = 20;
+const SESSION_COOKIE = 'gb_session';
+const FREE_SUBSCRIPTION_DAYS = 10;
+const STANDARD_SUBSCRIPTION_DAYS = 30;
+const BUSINESS_SUBSCRIPTION_DAYS = 365;
+const SUBSCRIPTION_PLANS = Object.freeze({FREE:{label:'Free',days:10,price:0},STANDARD:{label:'Standard',days:30,price:9880},BUSINESS:{label:'Business',days:365,price:99900},ULTIMATE:{label:'Ultimate',days:null,price:899000}});
+const CLIENT_REQUEST_MAX_BYTES = 1200000;
+const CLIENT_IMAGE_MAX_DATAURL_CHARS = 850000;
+const CLIENT_DETAILS_MAX_CHARS = 16000;
+const SUPPORT_MESSAGE_SUBJECT_MAX_CHARS = 160;
+const SUPPORT_MESSAGE_BODY_MAX_CHARS = 5000;
+const SUPPORT_MESSAGE_RECIPIENT_MAX = 200;
+
+// V15 — listes serveur fermées. Les libellés reçus du navigateur sont
+// normalisés puis comparés à ces listes avant toute écriture D1.
+const CASHIER_MOVEMENT_TYPES = Object.freeze([
+ 'Dépôt','Retrait','Frais dépôt espèce','Frais retrait espèce',
+ 'Frais de recouvrement','Frais de relevé bancaire','Frais de clôture',
+ 'Frais de gestion mensuelle','Frais de carnet'
+]);
+const CREDIT_AGENT_MOVEMENT_TYPES = Object.freeze([
+ 'Approvisionnement','Paiement de crédit','Frais de pénalité de retard',
+ 'Frais de carnet crédit'
+]);
+function movementTypeCanonicalKey(type){
+ let key=norm(type);
+ const aliases={
+  'paiement credit':'paiement de credit',
+  'paiement de crédit':'paiement de credit',
+  'frais depot especes':'frais depot espece',
+  'frais retrait especes':'frais retrait espece',
+  'frais carnet':'frais de carnet',
+  'frais de penalites de retard':'frais de penalite de retard'
+ };
+ return aliases[key]||key;
 }
-async function adminSetupStatus(db,env){
- const required=['institutions','users','sessions','plans','clients','accounts','transactions','audit_logs'];
- const found=await db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
- const names=new Set((found.results||[]).map(x=>x.name));
- const missing=required.filter(x=>!names.has(x));
- if(missing.length)return {ready:false,error:'DATABASE_SCHEMA_MISSING',missing_tables:missing};
- const columns=await db.prepare('PRAGMA table_info(users)').all();
- const cols=new Set((columns.results||[]).map(x=>x.name));
- const missingColumns=['password_hash','password_salt','password_iterations','active','role','institution_id','force_password_change'].filter(x=>!cols.has(x));
- if(missingColumns.length)return {ready:false,error:'DATABASE_SCHEMA_INCOMPATIBLE',missing_columns:missingColumns};
- const existing=await db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='superadmin'").first();
- if(Number(existing?.n)>0)return {ready:true,admin_exists:true};
- let status;
- try{status=await ensureInitialSuperAdmin(db,env)}catch(err){
-   console.error('MEGA_BOOTSTRAP_FAILURE',err);
-   const message=String(err?.message||err);
-   const error=/SQLITE|D1_ERROR|constraint|FOREIGN KEY|no such /i.test(message)?'ADMIN_BOOTSTRAP_DATABASE_ERROR':/PBKDF|crypto|deriveBits|operation/i.test(message)?'ADMIN_BOOTSTRAP_CRYPTO_ERROR':'ADMIN_BOOTSTRAP_RUNTIME_ERROR';
-   return {ready:false,error,stage:'bootstrap_insert',hint:'Consulter les logs runtime Cloudflare (MEGA_BOOTSTRAP_FAILURE). Aucun secret nest retourne.'};
+function movementTypeInList(type,list){const key=movementTypeCanonicalKey(type);return list.some(item=>movementTypeCanonicalKey(item)===key);}
+
+const DEFAULT_CHARGE_BASES_BANK_MANAGER = [
+ ['Frais Compte courant','Frais',0],['Frais Compte épargne','Frais',0],['Frais Compte entreprise','Frais',0],['Frais Compte association','Frais',0],['Frais Dépôt à terme','Frais',0],['Frais Compte crédit','Frais',0],['Frais Dépôt espèces','Frais',0],['Frais Retrait espèces','Frais',0],['Frais de recouvrement','Frais',0],['Frais de relevé bancaire','Frais',0],['Frais de clôture','Frais',0],['Frais de gestion mensuelle','Frais',0],['Frais Carnet','Frais',0]
+];
+async function seedDefaultCharges(env,bankId){
+ const count=await env.DB.prepare('SELECT COUNT(*) AS n FROM charge_bases WHERE bank_id=?').bind(bankId).first();
+ if(count && Number(count.n||0)>0)return;
+ for(const [name,cat,percent] of DEFAULT_CHARGE_BASES_BANK_MANAGER){
+  await env.DB.prepare('INSERT INTO charge_bases(id,bank_id,name,category,percent) VALUES(?,?,?,?,?)').bind(uid('CHG'),bankId,name,cat,percent).run();
  }
- const check=await db.prepare("SELECT COUNT(*) AS n FROM users WHERE role='superadmin' AND active=1").first();
- if(Number(check?.n)>0)return {ready:true,admin_exists:true,bootstrap:status.state};
- return {ready:false,error:'SUPERADMIN_NOT_INITIALIZED',bootstrap:status.state};
 }
-async function route(req,env){const db=env.DB;if(!db)return json({error:'D1_NOT_CONFIGURED'},503);const url=new URL(req.url),p=url.pathname,method=req.method;let body={};if(method==='POST'||method==='PATCH'||method==='PUT'){if(Number(req.headers.get('content-length')||0)>100000)return json({error:'BODY_TOO_LARGE'},413);try{body=await req.json()}catch{return json({error:'INVALID_JSON'},400)}}
-if(p==='/api/setup-status'&&method==='GET')return json(await adminSetupStatus(db,env));
-// Emergency administrator recovery: separate high-entropy one-use token, never the bootstrap password.
-// A deterministic audit_logs primary key makes token reuse fail atomically in D1.batch.
-if(p==='/api/admin/recover'&&method==='POST'){
- const configured=env.SUPER_ADMIN_RECOVERY_TOKEN;
- if(typeof configured!=='string'||configured.length<32||configured.length>512)return json({error:'RECOVERY_NOT_CONFIGURED'},503);
- const supplied=req.headers.get('x-mega-recovery-token')||'';
- const newPassword=body?.new_password;
- const email=String(env.SUPER_ADMIN_EMAIL||'mega@services.local').trim().toLowerCase();
- const clientIp=(req.headers.get('cf-connecting-ip')||'unknown').slice(0,128);
- const throttle='admin-recovery:'+await hash(clientIp);
- const failures=Number(await env.CACHE?.get(throttle)||0);
- if(failures>=5)return json({error:'RECOVERY_RATE_LIMITED'},429);
- const allowed=typeof newPassword==='string'&&newPassword.length>=12&&newPassword.length<=256
-  &&supplied.length===configured.length&&eq(await hash(supplied),await hash(configured));
- if(!allowed){await env.CACHE?.put(throttle,String(failures+1),{expirationTtl:900});return json({error:'RECOVERY_DENIED'},403)}
- const admin=await db.prepare("SELECT id FROM users WHERE email=? AND role='superadmin' AND active=1").bind(email).first();
- if(!admin)return json({error:'RECOVERY_DENIED'},403);
- const marker=await hash('MEGA_BANK_RECOVERY_V1:'+supplied);
- const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
- const digest=await pbkdf(newPassword,salt,NEW_PASSWORD_ITERATIONS);
- try{
-  // D1 batch is transactional; duplicate marker => all statements rolled back.
-  await db.batch([
-   db.prepare("INSERT INTO audit_logs(id,user_id,institution_id,action,detail) VALUES(?,?,NULL,'SUPERADMIN_PASSWORD_RECOVERED','one-time recovery')").bind(marker,admin.id),
-   db.prepare("UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,force_password_change=0,session_version=session_version+1 WHERE id=? AND role='superadmin' AND active=1").bind(digest,salt,NEW_PASSWORD_ITERATIONS,admin.id),
-   db.prepare('DELETE FROM sessions WHERE user_id=?').bind(admin.id)
-  ]);
- }catch(e){
-  if(/UNIQUE|constraint|PRIMARY KEY/i.test(String(e?.message||e)))return json({error:'RECOVERY_TOKEN_ALREADY_USED'},409);
-  console.error('MEGA_RECOVERY_DATABASE_FAILURE',e);return json({error:'RECOVERY_DATABASE_ERROR'},503);
+async function resetDefaultCharges(env,bankId){
+ await env.DB.prepare('DELETE FROM charge_bases WHERE bank_id=?').bind(bankId).run();
+ for(const [name,cat,percent] of DEFAULT_CHARGE_BASES_BANK_MANAGER){
+  await env.DB.prepare('INSERT INTO charge_bases(id,bank_id,name,category,percent) VALUES(?,?,?,?,?)').bind(uid('CHG'),bankId,name,cat,percent).run();
  }
- await env.CACHE?.delete(throttle);
- return json({ok:true,code:'PASSWORD_RESET_SUCCESS',next:'REMOVE_RECOVERY_SECRET_AND_REDEPLOY'},200);
 }
-if(p==='/api/login'&&method==='POST'){
- const setup=await adminSetupStatus(db,env);if(!setup.ready)return json(setup,503);
- const email=String(body.email||'').trim().toLowerCase(),pw=String(body.password||'');if(!email||pw.length>256||!['admin','agent','client'].includes(body.access))return json({error:'INVALID_CREDENTIALS'},401);
- const ip=(req.headers.get('cf-connecting-ip')||'unknown').slice(0,128);const key='login:'+await hash(ip+'|'+email);let attempts=Number(await env.CACHE?.get(key)||0);if(attempts>=8)return json({error:'TOO_MANY_ATTEMPTS'},429);
- const u=await db.prepare('SELECT * FROM users WHERE email=?').bind(email).first();const valid=u&&u.active&&typeof u.password_salt==='string'&&/^(?:[0-9a-f]{2})+$/i.test(u.password_salt)&&Number.isInteger(u.password_iterations)&&u.password_iterations>=100000&&typeof u.password_hash==='string'&&eq(await pbkdf(pw,u.password_salt,u.password_iterations),u.password_hash);if(valid&&!((body.access==='admin'&&['superadmin','admin'].includes(u.role))||(body.access==='agent'&&['teller','auditor'].includes(u.role))||(body.access==='client'&&u.role==='client')))return json({error:'ACCESS_PROFILE_MISMATCH'},403);
- if(!valid){await env.CACHE?.put(key,String(attempts+1),{expirationTtl:900});return json({error:'INVALID_CREDENTIALS'},401)}
- if(u.institution_id){const inst=await db.prepare('SELECT active FROM institutions WHERE id=?').bind(u.institution_id).first();if(!inst?.active)return json({error:'INSTITUTION_SUSPENDED'},403)}
- await env.CACHE?.delete(key);const token=rand(),csrf=rand();await db.prepare(`INSERT INTO sessions(id_hash,user_id,csrf_hash,expires_at) VALUES(?,?,?,?)`).bind(await hash(token),u.id,await hash(csrf),new Date(Date.now()+28800000).toISOString()).run();await audit(db,u,'LOGIN','');return json({ok:true,csrf,force_password_change:!!u.force_password_change},200,{'set-cookie':cookie(token)});
+let schemaReady = false;
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS banks (id TEXT PRIMARY KEY,name TEXT NOT NULL,manager TEXT,contact TEXT,address TEXT,email TEXT DEFAULT '',slogan TEXT DEFAULT '',logo TEXT DEFAULT '',stamp TEXT DEFAULT '',signature TEXT DEFAULT '',primary_color TEXT DEFAULT '#003b3b',secondary_color TEXT DEFAULT '#e7ad2f',footer_text TEXT DEFAULT 'Document généré automatiquement',legal_mentions TEXT DEFAULT '',cga_conditions TEXT DEFAULT '',currency TEXT DEFAULT 'FCFA',country TEXT DEFAULT '',city TEXT DEFAULT '',login TEXT NOT NULL UNIQUE,pass TEXT NOT NULL,auth_version INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL DEFAULT 'Actif',subscription TEXT NOT NULL DEFAULT 'FREE',subscription_started_at TEXT DEFAULT '',subscription_expires_at TEXT DEFAULT '',subscription_updated_at TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS clients (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,name TEXT NOT NULL,contact TEXT,job TEXT,address TEXT,piece TEXT,pass TEXT,client_type TEXT DEFAULT 'personne_physique',client_details TEXT DEFAULT '',photo_logo TEXT DEFAULT '',is_blocked INTEGER NOT NULL DEFAULT 0,is_deleted INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,client_id TEXT NOT NULL,number TEXT NOT NULL UNIQUE,type TEXT NOT NULL,balance REAL NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'Actif',is_blocked INTEGER NOT NULL DEFAULT 0,block_reason TEXT DEFAULT '',credit_fee REAL DEFAULT 0,credit_carnet_fee REAL DEFAULT 0,credit_amount REAL DEFAULT 0,credit_rate REAL DEFAULT 0,credit_duration INTEGER DEFAULT 0,credit_monthly REAL DEFAULT 0,credit_due_count INTEGER DEFAULT 0,credit_penalty_rate REAL DEFAULT 0,credit_total REAL DEFAULT 0,credit_choice TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS moves (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,account_id TEXT NOT NULL,type TEXT NOT NULL,description TEXT,amount REAL NOT NULL,balance_after REAL NOT NULL,created_by TEXT DEFAULT '',created_by_role TEXT DEFAULT '',is_voided INTEGER NOT NULL DEFAULT 0,voided_by TEXT DEFAULT '',voided_at TEXT DEFAULT '',void_reason TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,name TEXT,login TEXT,pass TEXT,auth_version INTEGER NOT NULL DEFAULT 1,role TEXT,status TEXT NOT NULL DEFAULT 'Actif',permissions TEXT DEFAULT '{"allow":[],"deny":[]}',last_login TEXT DEFAULT '',is_deleted INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS logs (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,message TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS security_logs (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,action TEXT,section TEXT,result TEXT,agent TEXT,role TEXT DEFAULT '',motif TEXT DEFAULT '',user_id TEXT DEFAULT '',permission TEXT DEFAULT '',route TEXT DEFAULT '',resource TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS charge_bases (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,name TEXT NOT NULL,category TEXT,percent REAL DEFAULT 0,created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS obligations (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,name TEXT NOT NULL,amount REAL DEFAULT 0,due_day INTEGER DEFAULT 1,base_type TEXT DEFAULT 'Bénéfice général',base_item TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS reset_requests (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,user_id TEXT,message TEXT,status TEXT DEFAULT 'En attente',created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS account_types (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,name TEXT NOT NULL,is_active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS movement_types (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,name TEXT NOT NULL,is_active INTEGER NOT NULL DEFAULT 1,category TEXT DEFAULT '',is_bank_revenue INTEGER,description TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS manual_revenues (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,name TEXT NOT NULL,operations INTEGER DEFAULT 0,amount REAL DEFAULT 0,created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS ignored_revenues (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,revenue_key TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS management_settings (bank_id TEXT PRIMARY KEY,year INTEGER NOT NULL,month INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'open',updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS support_messages (id TEXT PRIMARY KEY,broadcast_id TEXT DEFAULT '',sender_type TEXT NOT NULL,sender_bank_id TEXT DEFAULT '',recipient_bank_id TEXT NOT NULL,category TEXT NOT NULL DEFAULT 'message',subject TEXT NOT NULL,body TEXT NOT NULL,bank_read_at TEXT DEFAULT '',super_read_at TEXT DEFAULT '',deleted_by_bank INTEGER NOT NULL DEFAULT 0,deleted_by_super INTEGER NOT NULL DEFAULT 0,created_by TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE IF NOT EXISTS operation_requests (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,movement_id TEXT NOT NULL,requested_by TEXT NOT NULL,requested_by_name TEXT DEFAULT '',requested_by_role TEXT NOT NULL,request_type TEXT NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',reviewed_by TEXT DEFAULT '',reviewed_at TEXT DEFAULT '',review_note TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')));
+
+`;
+
+function norm(v){return String(v||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();}
+function creditCurrentInstallmentBase(acc){
+ if(!acc)return 0;
+ const monthly=Number(acc.credit_monthly||0)||0;
+ const total=Number(acc.credit_total||0)||0;
+ const dueCount=Number(acc.credit_due_count||acc.credit_duration||0)||0;
+ if(monthly>0)return Math.round(monthly*100)/100;
+ if(total>0&&dueCount>0)return Math.round((total/dueCount)*100)/100;
+ return Math.max(0,Number(acc.balance||0));
 }
-if(p==='/api/logout'&&method==='POST'){const token=cookies(req).mega_session;if(token)await db.prepare('DELETE FROM sessions WHERE id_hash=?').bind(await hash(token)).run();return json({ok:true},200,{'set-cookie':cookie('',0)})}
-const u=await actor(req,db);if(!u)return json({error:'UNAUTHORIZED'},401);
-if(method!=='GET'&&method!=='HEAD') {const token=req.headers.get('x-csrf-token');if(!token||!eq(await hash(token),u.csrf_hash))return json({error:'CSRF_INVALID'},403)}
-if(p==='/api/me'&&method==='GET')return json({user:{id:u.id,name:u.display_name,email:u.email,role:u.role,institution_id:u.institution_id},force_password_change:!!u.force_password_change});
-if(p==='/api/password'&&method==='POST') {if(!within(body.current,256)||!within(body.next,256)||body.next.length<12)return json({error:'PASSWORD_REQUIREMENTS'},400);const old=await db.prepare('SELECT password_hash,password_salt,password_iterations FROM users WHERE id=?').bind(u.id).first();if(!eq(await pbkdf(body.current,old.password_salt,old.password_iterations),old.password_hash))return json({error:'BAD_CURRENT_PASSWORD'},403);const salt=hex(crypto.getRandomValues(new Uint8Array(16))),ph=await pbkdf(body.next,salt,NEW_PASSWORD_ITERATIONS);await db.batch([db.prepare('UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,session_version=session_version+1,force_password_change=0 WHERE id=?').bind(ph,salt,NEW_PASSWORD_ITERATIONS,u.id),db.prepare('DELETE FROM sessions WHERE user_id=?').bind(u.id)]);await audit(db,u,'PASSWORD_CHANGED','');return json({ok:true},200,{'set-cookie':cookie('',0)})}
-if(u.force_password_change)return json({error:'CHANGE_PASSWORD_REQUIRED'},403);
-// Banque : Paramètres indépendants par institution.
-if(p.startsWith('/api/settings/') && u.institution_id && ['admin','teller','auditor'].includes(u.role)){
- const bank=u.institution_id, administrator=u.role==='admin';
- if(p==='/api/settings/profile'&&method==='GET'){
-  const institution=await db.prepare('SELECT id,name,created_at FROM institutions WHERE id=?').bind(bank).first();
-  const profile=await db.prepare('SELECT * FROM bank_profiles WHERE institution_id=?').bind(bank).first();
-  return json({institution,profile:profile||{}});
- }
- if(p==='/api/settings/profile'&&method==='POST'){
-  if(!administrator)return json({error:'FORBIDDEN'},403);
-  const keys=['slogan','responsible','phone','email','address','city','country','currency','primary_color','secondary_color','footer_text','legal_notice','logo_data'];
-  const vals=keys.map(k=>String(body[k]||'').trim());
-  if(!within(body.name,160)||vals.some((v,i)=>v.length>(keys[i]==='logo_data'?70000:keys[i]==='legal_notice'?3000:400)))return json({error:'INVALID_PROFILE'},400);
-  if(!/^#[0-9a-fA-F]{6}$/.test(body.primary_color)||!/^#[0-9a-fA-F]{6}$/.test(body.secondary_color))return json({error:'INVALID_COLOR'},400);
-  if(body.logo_data&&!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(body.logo_data))return json({error:'INVALID_LOGO'},400);
-  await db.batch([
-   db.prepare('UPDATE institutions SET name=? WHERE id=?').bind(String(body.name).trim(),bank),
-   db.prepare(`INSERT INTO bank_profiles(institution_id,${keys.join(',')},updated_at) VALUES(${Array(keys.length+1).fill('?').join(',')},CURRENT_TIMESTAMP) ON CONFLICT(institution_id) DO UPDATE SET ${keys.map(k=>k+'=excluded.'+k).join(',')},updated_at=CURRENT_TIMESTAMP`).bind(bank,...vals)
-  ]);
-  await audit(db,u,'BANK_PROFILE_UPDATED',bank);return json({ok:true});
- }
- if(p==='/api/settings/subscription'&&method==='GET'){
-  const subscription=await db.prepare('SELECT s.plan_code,s.start_at,s.end_at,s.created_by,p.price,p.duration_days FROM subscriptions s JOIN plans p ON p.code=s.plan_code WHERE s.institution_id=? ORDER BY s.rowid DESC LIMIT 1').bind(bank).first();
-  const institution=await db.prepare('SELECT name,created_at FROM institutions WHERE id=?').bind(bank).first();
-  const plans=await db.prepare('SELECT code,price,duration_days FROM plans ORDER BY price').all();
-  return json({subscription,institution,plans:plans.results});
- }
- if(p==='/api/settings/users'&&method==='GET'){
-  if(!administrator)return json({error:'FORBIDDEN'},403);
-  const rows=await db.prepare('SELECT id,display_name,email,role,active,created_at FROM users WHERE institution_id=? ORDER BY created_at DESC LIMIT 200').bind(bank).all();return json({items:rows.results});
- }
- if(p==='/api/settings/users'&&method==='POST'){
-  if(!administrator)return json({error:'FORBIDDEN'},403);
-  const email=String(body.email||'').trim().toLowerCase(),name=String(body.name||'').trim(),password=String(body.password||''),role=String(body.role||'');
-  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||!within(name,160)||password.length<12||password.length>256||!['teller','auditor'].includes(role))return json({error:'INVALID_USER'},400);
-  const salt=hex(crypto.getRandomValues(new Uint8Array(16))),digest=await pbkdf(password,salt,NEW_PASSWORD_ITERATIONS);
-  try{await db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) VALUES(?,?,?,?,?,?,?,?,1,0)').bind(id(),bank,email,name,role,digest,salt,NEW_PASSWORD_ITERATIONS).run()}catch(e){if(/UNIQUE/i.test(String(e)))return json({error:'EMAIL_ALREADY_USED'},409);throw e}
-  await audit(db,u,'AGENT_CREATED',email);return json({ok:true},201);
- }
- if(p==='/api/settings/users/status'&&method==='POST'){
-  if(!administrator)return json({error:'FORBIDDEN'},403);
-  const target=await db.prepare("SELECT id,active FROM users WHERE id=? AND institution_id=? AND role IN ('teller','auditor')").bind(body.id,bank).first();if(!target)return json({error:'AGENT_NOT_FOUND'},404);
-  await db.batch([db.prepare('UPDATE users SET active=?,session_version=session_version+1 WHERE id=? AND institution_id=?').bind(body.active?1:0,target.id,bank),db.prepare('DELETE FROM sessions WHERE user_id=?').bind(target.id)]);
-  await audit(db,u,'AGENT_STATUS_CHANGED',target.id);return json({ok:true});
- }
- if(p==='/api/settings/users/reset'&&method==='POST'){
-  if(!administrator)return json({error:'FORBIDDEN'},403);
-  const target=await db.prepare("SELECT id FROM users WHERE id=? AND institution_id=? AND role IN ('teller','auditor')").bind(body.id,bank).first();
-  if(!target)return json({error:'AGENT_NOT_FOUND'},404);
-  const current=String(body.admin_password||''),next=String(body.next_password||'');
-  if(current.length>256||next.length<12||next.length>256)return json({error:'PASSWORD_REQUIREMENTS'},400);
-  const own=await db.prepare('SELECT password_hash,password_salt,password_iterations FROM users WHERE id=?').bind(u.id).first();
-  if(!eq(await pbkdf(current,own.password_salt,own.password_iterations),own.password_hash))return json({error:'BAD_CURRENT_PASSWORD'},403);
-  const salt=hex(crypto.getRandomValues(new Uint8Array(16))),digest=await pbkdf(next,salt,NEW_PASSWORD_ITERATIONS);
-  await db.batch([db.prepare('UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,session_version=session_version+1 WHERE id=? AND institution_id=?').bind(digest,salt,NEW_PASSWORD_ITERATIONS,target.id,bank),db.prepare('DELETE FROM sessions WHERE user_id=?').bind(target.id)]);
-  await audit(db,u,'AGENT_PASSWORD_RESET',target.id);return json({ok:true});
- }
- if(p==='/api/settings/terms'&&method==='GET'){
-  const r=await db.prepare('SELECT body,updated_at FROM bank_membership_terms WHERE institution_id=?').bind(bank).first();return json({body:r?.body||'',updated_at:r?.updated_at||null});
- }
- if(p==='/api/settings/terms'&&method==='POST'){
-  if(!administrator)return json({error:'FORBIDDEN'},403);
-  const text=String(body.body||'');if(text.length>30000)return json({error:'DOCUMENT_TOO_LONG'},413);
-  await db.prepare('INSERT INTO bank_membership_terms(institution_id,body) VALUES(?,?) ON CONFLICT(institution_id) DO UPDATE SET body=excluded.body,updated_at=CURRENT_TIMESTAMP').bind(bank,text).run();
-  await audit(db,u,'TERMS_UPDATED',bank);return json({ok:true});
- }
- return json({error:'NOT_FOUND'},404);
+function uid(prefix='ID'){return `${prefix}-${Date.now().toString(36).toUpperCase()}-${crypto.randomUUID().slice(0,8).toUpperCase()}`;}
+const COMPANY_CLIENT_MARKER='__BANK_COMPANY_CLIENT__';
+function companyClientId(bankId){return 'COMPANY-CLIENT-'+String(bankId||'').replace(/[^A-Za-z0-9_-]/g,'');}
+function companyAccountId(bankId){return 'COMPANY-ACCOUNT-'+String(bankId||'').replace(/[^A-Za-z0-9_-]/g,'');}
+function companyAccountNumber(bankId){const clean=String(bankId||'').replace(/[^A-Za-z0-9]/g,'').toUpperCase().slice(-8)||'BANK';return 'ENT-'+clean;}
+function isCompanyClientRow(c,bankId){return !!c&&(String(c.id||'')===companyClientId(bankId)||String(c.piece||'')===COMPANY_CLIENT_MARKER);}
+function isCompanyAccountRow(a,bankId){return !!a&&(String(a.id||'')===companyAccountId(bankId)||String(a.number||'')===companyAccountNumber(bankId));}
+function isCompanyMovementType(type){const t=norm(type);return t==='approvisionnement'||t==='decaissement';}
+function isCompanyDecaissementType(type){return norm(type)==='decaissement';}
+function isCompanyApprovisionnementType(type){return norm(type)==='approvisionnement';}
+function rowDateValue(row){
+ const raw=String((row&&row.created_at)||(row&&row.date)||(row&&row.createdAt)||'').replace(' ','T');
+ const d=new Date(raw);
+ return isNaN(d.getTime())?null:d;
 }
-// Rapports OUKAMI : revenus non disponibles sans écritures classées officiellement.
-if(p.startsWith('/api/reports/') && u.institution_id && ['admin','auditor'].includes(u.role)){
- const bank=u.institution_id;
- const validDate=x=>/^\d{4}-\d{2}-\d{2}$/.test(x)&&!Number.isNaN(Date.parse(x));
- if(p==='/api/reports/revenues'&&method==='GET'){
-  return json({available:false,reason:'Les transactions actuelles ne comportent pas de classification de revenu bancaire. Aucun bénéfice ne peut être déduit des dépôts et retraits.',categories:[],total:0});
- }
- if(p==='/api/reports/obligations'&&method==='GET'){
-  const r=await db.prepare('SELECT id,label,basis,service_code,amount,created_at FROM monthly_obligations WHERE institution_id=? AND active=1 ORDER BY label,id').bind(bank).all();
-  return json({items:r.results,total:r.results.reduce((s,x)=>s+x.amount,0)});
- }
- if(p==='/api/reports/obligations'&&method==='POST'){
-  if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
-  const label=String(body.label||'').trim(),basis=String(body.basis||''),amount=Number(body.amount),service=String(body.service_code||'').trim();
-  if(!label||label.length>150||!['GENERAL','SERVICE'].includes(basis)||!Number.isSafeInteger(amount)||amount<0||amount>1e12||service.length>120||basis==='SERVICE'&&!service)return json({error:'INVALID_OBLIGATION'},400);
-  if(body.id){const existing=await db.prepare('SELECT id FROM monthly_obligations WHERE institution_id=? AND id=? AND active=1').bind(bank,body.id).first();if(!existing)return json({error:'NOT_FOUND'},404);
-   await db.prepare('UPDATE monthly_obligations SET label=?,basis=?,service_code=?,amount=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND institution_id=?').bind(label,basis,service,amount,body.id,bank).run();await audit(db,u,'OBLIGATION_UPDATED',body.id);
-  }else{const key=id();await db.prepare('INSERT INTO monthly_obligations(id,institution_id,label,basis,service_code,amount) VALUES(?,?,?,?,?,?)').bind(key,bank,label,basis,service,amount).run();await audit(db,u,'OBLIGATION_CREATED',key)}
-  return json({ok:true});
- }
- if(p==='/api/reports/obligations/delete'&&method==='POST'){
-  if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
-  const item=await db.prepare('SELECT id FROM monthly_obligations WHERE id=? AND institution_id=? AND active=1').bind(body.id,bank).first();if(!item)return json({error:'NOT_FOUND'},404);
-  await db.prepare('UPDATE monthly_obligations SET active=0,updated_at=CURRENT_TIMESTAMP WHERE id=? AND institution_id=?').bind(item.id,bank).run();await audit(db,u,'OBLIGATION_DEACTIVATED',item.id);return json({ok:true});
- }
- if(p==='/api/reports/accounts-summary'&&method==='GET'){
-  const from=url.searchParams.get('from')||'',to=url.searchParams.get('to')||'';
-  if(!validDate(from)||!validDate(to)||from>to||Date.parse(to)-Date.parse(from)>366*86400000)return json({error:'INVALID_DATE_RANGE'},400);
-  const results=await db.prepare(`SELECT a.kind,COUNT(DISTINCT a.id) account_count,
-   COALESCE(SUM(CASE WHEN t.kind='DEPOSIT' THEN t.amount ELSE 0 END),0) deposits,
-   COALESCE(SUM(CASE WHEN t.kind='WITHDRAWAL' THEN t.amount ELSE 0 END),0) withdrawals
-   FROM accounts a LEFT JOIN transactions t ON t.account_id=a.id AND t.institution_id=a.institution_id AND t.created_at>=? AND t.created_at<?
-   WHERE a.institution_id=? GROUP BY a.kind ORDER BY a.kind`).bind(from+' 00:00:00',to+' 23:59:59.999',bank).all();
-  // COUNT DISTINCT avoids counting the same account once per transaction.
-  return json({items:results.results,from,to,notice:'Totaux dépôt/retrait sur la période ; les comptes CREDIT et TERM nécessitent leurs registres contractuels pour afficher une dette ou un placement.'});
- }
- if(p==='/api/reports/accounts-detail'&&method==='GET'){
-  const from=url.searchParams.get('from')||'',to=url.searchParams.get('to')||'',kind=url.searchParams.get('kind')||'';
-  const page=Math.min(10000,Math.max(1,Number(url.searchParams.get('page')||1)));
-  if(!validDate(from)||!validDate(to)||from>to||!['CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION'].includes(kind))return json({error:'INVALID_FILTER'},400);
-  const r=await db.prepare(`SELECT t.reference,t.created_at,t.kind,t.description,t.amount,a.number,c.name client
-   FROM transactions t JOIN accounts a ON a.id=t.account_id AND a.institution_id=t.institution_id JOIN clients c ON c.id=a.client_id AND c.institution_id=t.institution_id
-   WHERE t.institution_id=? AND a.kind=? AND t.created_at>=? AND t.created_at<? ORDER BY t.created_at DESC,t.id DESC LIMIT 21 OFFSET ?`)
-   .bind(bank,kind,from+' 00:00:00',to+' 23:59:59.999',(page-1)*20).all();return json({items:r.results.slice(0,20),has_more:r.results.length>20,page});
- }
- return json({error:'NOT_FOUND'},404);
+function rowInScope(row,scope={}){
+ const d=rowDateValue(row);
+ if(!d)return false;
+ if(scope.year&&d.getFullYear()!==Number(scope.year))return false;
+ if(scope.month&&(d.getMonth()+1)!==Number(scope.month))return false;
+ if(scope.start){const s=new Date(String(scope.start)+'T00:00:00');if(!isNaN(s.getTime())&&d<s)return false;}
+ if(scope.end){const e=new Date(String(scope.end)+'T23:59:59');if(!isNaN(e.getTime())&&d>e)return false;}
+ return true;
 }
-// Synthèse transversale en lecture seule : chaque indicateur conserve sa nature comptable.
-// Les montants ci-dessous sont calculés dans D1, jamais à partir des listes paginées.
-if(p==='/api/financial/overview'&&method==='GET'){
- if(!u.institution_id||!['admin','auditor'].includes(u.role))return json({error:'FORBIDDEN'},403);
- const bank=u.institution_id;
- const [accounts,clients,flows,treasury,obligations,drafts]=await db.batch([
-  db.prepare("SELECT COUNT(*) total,COALESCE(SUM(balance),0) balances FROM accounts WHERE institution_id=? AND status='ACTIVE'").bind(bank),
-  db.prepare('SELECT COUNT(*) total FROM clients WHERE institution_id=? AND active=1').bind(bank),
-  db.prepare("SELECT COALESCE(SUM(CASE WHEN kind='DEPOSIT' THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN kind='WITHDRAWAL' THEN amount ELSE 0 END),0) withdrawals,COUNT(*) movements FROM transactions WHERE institution_id=?").bind(bank),
-  db.prepare('SELECT balance FROM enterprise_treasury WHERE institution_id=?').bind(bank),
-  db.prepare('SELECT COUNT(*) total,COALESCE(SUM(amount),0) fixed_total FROM monthly_obligations WHERE institution_id=? AND active=1').bind(bank),
-  db.prepare("SELECT kind,COUNT(*) total FROM account_contract_drafts WHERE institution_id=? AND status='DRAFT' GROUP BY kind").bind(bank)
- ]);
- return json({institution_id:bank,clients_active:Number(clients.results[0]?.total||0),accounts_active:Number(accounts.results[0]?.total||0),client_account_balances:Number(accounts.results[0]?.balances||0),deposits_recorded:Number(flows.results[0]?.deposits||0),withdrawals_recorded:Number(flows.results[0]?.withdrawals||0),movement_count:Number(flows.results[0]?.movements||0),enterprise_cash_balance:Number(treasury.results[0]?.balance||0),monthly_fixed_obligations:Number(obligations.results[0]?.fixed_total||0),monthly_obligations_count:Number(obligations.results[0]?.total||0),contract_drafts:drafts.results,revenue_classification_available:false,note:'Les soldes clients, la trésorerie entreprise et les obligations sont des indicateurs distincts et ne doivent pas être additionnés.'});
+function isCreditAccountType(type){const t=norm(type);return t.includes('credit')||t.includes('crédit');}
+function isCreditPaymentTypeServer(type){
+ const t=norm(type);
+ return t==='paiement credit'||t==='paiement de credit'||t==='paiement crédit'||t==='paiement de crédit'||t.includes('remboursement credit')||t.includes('remboursement crédit');
 }
-if(p==='/api/dashboard'&&method==='GET'){
- if(u.role==='superadmin'){const [x,m,plans]=await db.batch([db.prepare('SELECT COUNT(*) total FROM institutions'),db.prepare('SELECT COUNT(*) total FROM users WHERE role<>?').bind('superadmin'),db.prepare(`SELECT s.plan_code,COUNT(*) n FROM subscriptions s JOIN (SELECT institution_id,MAX(rowid) rid FROM subscriptions GROUP BY institution_id) latest ON latest.rid=s.rowid GROUP BY s.plan_code`)]);const stats={institutions:x.results[0].total,members:m.results[0].total,FREE:0,STANDARD:0,BUSINESS:0,ULTIMATE:0};for(const row of plans.results)if(Object.hasOwn(stats,row.plan_code))stats[row.plan_code]=row.n;stats.no_plan=Math.max(0,stats.institutions-(stats.FREE+stats.STANDARD+stats.BUSINESS+stats.ULTIMATE));return json(stats)}
- const [c,a,b,t]=await db.batch([db.prepare('SELECT COUNT(*) n FROM clients WHERE institution_id=?').bind(u.institution_id),db.prepare('SELECT COUNT(*) n,COALESCE(SUM(balance),0) total FROM accounts WHERE institution_id=? AND status=?').bind(u.institution_id,'ACTIVE'),db.prepare('SELECT COALESCE(SUM(CASE WHEN delta>0 THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN delta<0 THEN amount ELSE 0 END),0) withdrawals FROM transactions WHERE institution_id=?').bind(u.institution_id),db.prepare('SELECT COUNT(*) n FROM transactions WHERE institution_id=?').bind(u.institution_id)]);
- return json({clients:c.results[0].n,accounts:a.results[0].n,balance:a.results[0].total,deposits:b.results[0].deposits,withdrawals:b.results[0].withdrawals,movements:t.results[0].n});
+function isRevenueTextServer(type,desc=''){
+ const t=norm(String(type||'')+' '+String(desc||''));
+ return t.includes('frais')||t.includes('penalite')||t.includes('retard')||t.includes('interet')||t.includes('commission')||t.includes('service')||t.includes('carnet')||t.includes('ouverture')||t.includes('dossier')||t.includes('recouvrement')||t.includes('releve')||t.includes('cloture');
 }
-if((p==='/api/bank/insights'||p==='/api/bank/report')&&method==='GET'){
- if(!u.institution_id||u.role==='superadmin'||!['admin','teller','auditor'].includes(u.role))return json({error:'FORBIDDEN'},403);
- const ins=await db.prepare('SELECT name FROM institutions WHERE id=?').bind(u.institution_id).first();
- if(p==='/api/bank/report'){
-  const from=url.searchParams.get('from')||'',to=url.searchParams.get('to')||'';
-  if(!/^\d{4}-\d{2}-\d{2}$/.test(from)||!/^\d{4}-\d{2}-\d{2}$/.test(to)||from>to||Date.parse(to)-Date.parse(from)>366*86400000)return json({error:'INVALID_DATE_RANGE'},400);
-  const r=await db.prepare(`SELECT COUNT(*) movements,COALESCE(SUM(CASE WHEN kind='DEPOSIT' THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN kind='WITHDRAWAL' THEN amount ELSE 0 END),0) withdrawals,COALESCE(SUM(CASE WHEN kind='TRANSFER_OUT' THEN amount ELSE 0 END),0) transfers FROM transactions WHERE institution_id=? AND created_at>=? AND created_at<?`).bind(u.institution_id,from+' 00:00:00',to+' 23:59:59.999').first();
-  return json({...r,institution:ins?.name||'',from,to});
+function companyCreditRepaymentSourceMarker(moveId){return '[CREDIT_REPAYMENT_SOURCE:'+String(moveId||'').replace(/[^A-Za-z0-9_-]/g,'')+']';}
+
+function creditDecaissementSourceMarkerServer(moveId){return '[DECAISSEMENT_SOURCE:'+String(moveId||'').replace(/[^A-Za-z0-9_-]/g,'')+']';}
+async function usedCreditAmountForDecaissementSource(env,bankId,moveId){
+ const marker=creditDecaissementSourceMarkerServer(moveId);
+ const rows=(await env.DB.prepare("SELECT credit_amount FROM accounts WHERE bank_id=? AND COALESCE(is_deleted,0)=0 AND credit_choice LIKE ?").bind(bankId,'%'+marker+'%').all()).results||[];
+ return rows.reduce((s,a)=>s+Math.abs(Number((a&&a.credit_amount)||0)||0),0);
+}
+async function availableCreditSourceDecaissement(env,bankId,moveId){
+ const companyId=companyAccountId(bankId);
+ const m=await env.DB.prepare("SELECT id,type,amount,balance_after FROM moves WHERE id=? AND bank_id=? AND account_id=? LIMIT 1").bind(moveId,bankId,companyId).first();
+ if(!m)return {ok:false,error:'Source du montant introuvable.'};
+ if(norm(m.type)!=='decaissement')return {ok:false,error:'La source du montant doit être un décaissement du Compte entreprise automatique.'};
+ const soldeApres=Math.round((Number(m.balance_after||0)||0)*100)/100;
+ if(!(soldeApres>0))return {ok:false,error:'Ce décaissement ne peut pas être choisi : son Solde après doit être supérieur à 0 FCFA.'};
+ const initial=Math.abs(Number(m.amount||0)||0);
+ const used=await usedCreditAmountForDecaissementSource(env,bankId,moveId);
+ const available=Math.max(0,Math.round((initial-used)*100)/100);
+ return {ok:true,move:m,initial,used,available,soldeApres,marker:creditDecaissementSourceMarkerServer(moveId)};
+}
+function creditApprovisionnementSourceMarkerServer(moveId){return '[APPROVISIONNEMENT_SOURCE:'+String(moveId||'').replace(/[^A-Za-z0-9_-]/g,'')+']';}
+async function usedCreditAmountForApprovisionnementSource(env,bankId,moveId){
+ const marker=creditApprovisionnementSourceMarkerServer(moveId);
+ const rows=(await env.DB.prepare("SELECT credit_amount FROM accounts WHERE bank_id=? AND COALESCE(is_deleted,0)=0 AND credit_choice LIKE ?").bind(bankId,'%'+marker+'%').all()).results||[];
+ return rows.reduce((sum,a)=>sum+Math.abs(Number((a&&a.credit_amount)||0)||0),0);
+}
+async function availableCreditSourceApprovisionnement(env,bankId,moveId){
+ const companyId=companyAccountId(bankId);
+ const m=await env.DB.prepare("SELECT id,type,amount,balance_after FROM moves WHERE id=? AND bank_id=? AND account_id=? LIMIT 1").bind(moveId,bankId,companyId).first();
+ if(!m)return {ok:false,error:'Source du montant introuvable.'};
+ if(norm(m.type)!=='approvisionnement')return {ok:false,error:'La source du montant doit être un approvisionnement du Compte entreprise automatique.'};
+ const soldeApres=Math.round((Number(m.balance_after||0)||0)*100)/100;
+ if(!(soldeApres>0))return {ok:false,error:'Cet approvisionnement ne peut pas être choisi : son Solde après doit être supérieur à 0 FCFA.'};
+ const initial=Math.abs(Number(m.amount||0)||0);
+ const used=await usedCreditAmountForApprovisionnementSource(env,bankId,moveId);
+ const available=Math.max(0,Math.round((initial-used)*100)/100);
+ return {ok:true,move:m,initial,used,available,soldeApres,marker:creditApprovisionnementSourceMarkerServer(moveId)};
+}
+async function computeDecaissementRemainingAvailableTotal(env,bankId,scope={}){
+ const companyId=companyAccountId(bankId);
+ const rows=(await env.DB.prepare("SELECT id,type,amount,balance_after,created_at FROM moves WHERE bank_id=? AND account_id=? ORDER BY datetime(created_at) ASC, id ASC").bind(bankId,companyId).all()).results||[];
+ let total=0;
+ for(const m of rows){
+  if(!isCompanyDecaissementType(m.type))continue;
+  if(scope&&(scope.year||scope.month||scope.start||scope.end)&&!rowInScope(m,scope))continue;
+  const info=await availableCreditSourceDecaissement(env,bankId,m.id);
+  if(info&&info.ok)total+=Number(info.available||0);
  }
- const [b,t,m]=await db.batch([
-  db.prepare(`SELECT COALESCE(SUM(balance),0) balance FROM accounts WHERE institution_id=? AND status='ACTIVE'`).bind(u.institution_id),
-  db.prepare(`SELECT COUNT(*) movements,COALESCE(SUM(CASE WHEN kind='DEPOSIT' THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN kind='WITHDRAWAL' THEN amount ELSE 0 END),0) withdrawals FROM transactions WHERE institution_id=?`).bind(u.institution_id),
-  db.prepare(`SELECT substr(created_at,1,7) month,COUNT(*) movements,COALESCE(SUM(CASE WHEN kind='DEPOSIT' THEN amount ELSE 0 END),0) deposits,COALESCE(SUM(CASE WHEN kind='WITHDRAWAL' THEN amount ELSE 0 END),0) withdrawals FROM transactions WHERE institution_id=? AND created_at>=datetime('now','-12 months') GROUP BY substr(created_at,1,7) ORDER BY month DESC LIMIT 12`).bind(u.institution_id)]);
- return json({institution:ins?.name||'',balance:b.results[0].balance,...t.results[0],months:m.results});
+ return Math.round(total*100)/100;
 }
-if(p==='/api/clients'&&method==='GET'){if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);const page=Math.min(100,Math.max(1,Number(url.searchParams.get('page')||1))),q=String(url.searchParams.get('q')||'').slice(0,80);const rows=await db.prepare('SELECT id,number,kind,name,phone,active,block_reason,created_at FROM clients WHERE institution_id=? AND (name LIKE ? OR number LIKE ? OR phone LIKE ?) ORDER BY created_at DESC,id DESC LIMIT 21 OFFSET ?').bind(u.institution_id,...Array(3).fill('%'+q+'%'),(page-1)*20).all();return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page})}
-if(p==='/api/clients'&&method==='POST'){
- if(!writable(u,'clients')||!u.institution_id)return json({error:'FORBIDDEN'},403);
- if(!['PERSON','COMPANY'].includes(body.kind))return json({error:'INVALID_CLIENT_TYPE'},400);
- const person=['last_name','first_name','birth_date','birth_place','sex','profession','identity_type','identity_number','phone','whatsapp','commune','neighborhood','emergency_name','emergency_phone','emergency_relation'];
- const company=['company_name','acronym','legal_form','activity','registration','tax_number','creation_date','city','company_commune','company_neighborhood','headquarters','company_phone','company_whatsapp','company_email','representative_last','representative_first','representative_role','representative_phone','representative_id_type','representative_id_number'];
- const required=body.kind==='PERSON'?['last_name','first_name','birth_date','birth_place','sex','identity_type','identity_number','phone','commune','neighborhood','emergency_name','emergency_phone','emergency_relation']:['company_name','legal_form','company_phone','representative_last','representative_phone','representative_id_type','representative_id_number'];
- const keys=body.kind==='PERSON'?person:company;
- if(required.some(k=>typeof body[k]!=='string'||!body[k].trim()||body[k].length>180)||keys.some(k=>body[k]!=null&&(typeof body[k]!=='string'||body[k].length>180)))return json({error:'INVALID_CLIENT_FIELDS'},400);
- if(body.kind==='PERSON'&&(!['Masculin','Féminin'].includes(body.sex)||!['CNI','Passeport','Attestation','Autre'].includes(body.identity_type)))return json({error:'INVALID_CLIENT_FIELDS'},400);
- if(body.kind==='COMPANY'&&!['CNI','Passeport','Attestation','Autre'].includes(body.representative_id_type))return json({error:'INVALID_CLIENT_FIELDS'},400);
- const details=Object.fromEntries(keys.map(k=>[k,String(body[k]||'').trim()]));
- const name=body.kind==='PERSON'?`${details.last_name} ${details.first_name}`:details.company_name;
- const phone=body.kind==='PERSON'?details.phone:details.company_phone;
- const key=id(),no='CL-'+key.slice(0,8).toUpperCase();
- await db.prepare('INSERT INTO clients(id,institution_id,number,kind,name,phone,details_json) VALUES(?,?,?,?,?,?,?)').bind(key,u.institution_id,no,body.kind,name,phone,JSON.stringify(details)).run();
- await audit(db,u,'CLIENT_CREATED',key);return json({ok:true,id:key,number:no},201)
-}
-function nameForClient(d,kind){return kind==='PERSON'?String(d.last_name||'').trim():String(d.company_name||'').trim()}
-if(p.startsWith('/api/clients/') && ['GET','PUT','DELETE'].includes(method)){
- const clientId=decodeURIComponent(p.slice('/api/clients/'.length));
- if(!clientId||clientId.includes('/'))return json({error:'INVALID_CLIENT_ID'},400);
- const client=await db.prepare('SELECT id,kind,name,phone,active,details_json FROM clients WHERE id=? AND institution_id=?').bind(clientId,u.institution_id).first();
- if(!client)return json({error:'CLIENT_NOT_FOUND'},404);
- if(method==='GET')return json({client:{...client,details:JSON.parse(client.details_json||'{}')}});
- if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
- if(method==='DELETE'){
-  const linked=await db.prepare('SELECT COUNT(*) n FROM accounts WHERE client_id=? AND institution_id=?').bind(clientId,u.institution_id).first();
-  if(Number(linked.n)>0)return json({error:'CLIENT_HAS_ACCOUNTS',hint:'Le client possède des comptes : bloquez-le pour conserver son historique financier.'},409);
-  await db.prepare('DELETE FROM clients WHERE id=? AND institution_id=? AND NOT EXISTS (SELECT 1 FROM accounts WHERE client_id=?)').bind(clientId,u.institution_id,clientId).run();
-  await audit(db,u,'CLIENT_DELETED',clientId);return json({ok:true});
+
+async function computeCreditRepaidPrincipalTotal(env,bankId,scope={}){
+ const rows=(await env.DB.prepare("SELECT id,number,type,credit_amount FROM accounts WHERE bank_id=? AND COALESCE(is_deleted,0)=0 AND lower(COALESCE(status,'Actif')) NOT LIKE '%supprim%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%delete%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%desactiv%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%archive%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%ferme%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%clotur%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%inactif%' AND (lower(COALESCE(type,'')) LIKE '%credit%' OR lower(COALESCE(type,'')) LIKE '%crédit%') AND COALESCE(credit_amount,0)>0 ORDER BY created_at ASC").bind(bankId).all()).results||[];
+ let total=0;
+ for(const acc of rows){
+  const principal=Math.abs(Number(acc.credit_amount||0)||0);
+  if(principal<=0)continue;
+  let remaining=principal;
+  const pays=(await env.DB.prepare("SELECT id,type,description,amount,created_at FROM moves WHERE bank_id=? AND account_id=? AND COALESCE(is_voided,0)=0 ORDER BY datetime(created_at) ASC, id ASC").bind(bankId,acc.id).all()).results||[];
+  for(const m of pays){
+   if(!isCreditPaymentTypeServer(m.type))continue;
+   const paid=Math.abs(Number(m.amount||0)||0);
+   if(paid<=0||remaining<=0)continue;
+   const part=Math.min(paid,remaining);
+   remaining=Math.max(0,remaining-part);
+   if(!scope||(!scope.year&&!scope.month&&!scope.start&&!scope.end)||rowInScope(m,scope))total+=part;
+  }
  }
- if(body.action==='block'){
-  if(!within(body.reason,500))return json({error:'BLOCK_REASON_REQUIRED'},400);
-  await db.prepare('UPDATE clients SET active=0,block_reason=? WHERE id=? AND institution_id=?').bind(body.reason.trim(),clientId,u.institution_id).run();
-  await audit(db,u,'CLIENT_BLOCKED',clientId);return json({ok:true});
+ return Math.round(total*100)/100;
+}
+async function computeTotalRevenueBank(env,bankId,scope={}){
+ // V17 — Total Revenu banque : même logique que le rapport des revenus.
+ // Les flux de trésorerie du Compte entreprise (Approvisionnement / Décaissement)
+ // ne sont jamais des revenus. Les paiements de crédit sont du remboursement de
+ // capital/dette et ne sont jamais comptés ici.
+ const accountId=companyAccountId(bankId);
+ const configured=(await env.DB.prepare("SELECT name,is_active,category,is_bank_revenue FROM movement_types WHERE bank_id=?").bind(bankId).all()).results||[];
+ const explicit=new Map(configured.map(r=>[norm(r.name),{active:Number(r.is_active??1)!==0,isRevenue:Number(r.is_bank_revenue)===1||norm(r.category)==='bank_revenue'}]));
+ const ignoredRows=(await env.DB.prepare('SELECT revenue_key FROM ignored_revenues WHERE bank_id=?').bind(bankId).all()).results||[];
+ const ignored=new Set(ignoredRows.map(r=>norm(r.revenue_key)));
+ const rows=(await env.DB.prepare("SELECT m.id,m.account_id,m.type,m.description,m.amount,m.created_at,a.number AS acc_number,a.type AS acc_type FROM moves m JOIN accounts a ON a.id=m.account_id AND a.bank_id=m.bank_id WHERE m.bank_id=? AND COALESCE(m.is_voided,0)=0 AND COALESCE(a.is_deleted,0)=0 AND lower(COALESCE(a.status,'Actif')) NOT LIKE '%supprim%' AND lower(COALESCE(a.status,'Actif')) NOT LIKE '%delete%' AND lower(COALESCE(a.status,'Actif')) NOT LIKE '%desactiv%' AND lower(COALESCE(a.status,'Actif')) NOT LIKE '%archive%' AND lower(COALESCE(a.status,'Actif')) NOT LIKE '%ferme%' AND lower(COALESCE(a.status,'Actif')) NOT LIKE '%clotur%' AND lower(COALESCE(a.status,'Actif')) NOT LIKE '%inactif%' ORDER BY datetime(m.created_at) ASC, m.id ASC").bind(bankId).all()).results||[];
+ let total=0;
+ for(const m of rows){
+  if(scope&&(scope.year||scope.month||scope.start||scope.end)&&!rowInScope(m,scope))continue;
+  const amount=Math.abs(Number(m.amount||0)||0);
+  if(amount<=0)continue;
+  const isCompany=String(m.account_id||'')===String(accountId)||String(m.acc_number||'')===companyAccountNumber(bankId);
+  if(isCompany)continue;
+  if(isCreditPaymentTypeServer(m.type))continue;
+  const key=norm(m.type);
+  if(ignored.has(key)||ignored.has(norm(m.id)))continue;
+  const cfg=explicit.get(key);
+  if(cfg){if(cfg.active&&cfg.isRevenue)total+=amount;continue;}
+  if(isRevenueTextServer(m.type,m.description))total+=amount;
  }
- if(body.action==='unblock'){
-  await db.prepare('UPDATE clients SET active=1,block_reason=NULL WHERE id=? AND institution_id=?').bind(clientId,u.institution_id).run();
-  await audit(db,u,'CLIENT_UNBLOCKED',clientId);return json({ok:true});
+ return Math.round(total*100)/100;
+}
+async function computeCompanyDecaissementTotal(env,bankId,scope={}){
+ const accountId=companyAccountId(bankId);
+ const rows=(await env.DB.prepare("SELECT id,type,amount,created_at FROM moves WHERE bank_id=? AND account_id=? AND COALESCE(is_voided,0)=0 ORDER BY datetime(created_at) ASC, id ASC").bind(bankId,accountId).all()).results||[];
+ let total=0;
+ for(const m of rows){
+  if(scope&&(scope.year||scope.month||scope.start||scope.end)&&!rowInScope(m,scope))continue;
+  if(!isCompanyDecaissementType(m.type))continue;
+  total+=Math.abs(Number(m.amount||0)||0);
  }
- if(body.action==='edit'){
-  const current=JSON.parse(client.details_json||'{}');const keys=client.kind==='PERSON'?['last_name','first_name','birth_date','birth_place','sex','profession','identity_type','identity_number','phone','whatsapp','commune','neighborhood','emergency_name','emergency_phone','emergency_relation']:['company_name','acronym','legal_form','activity','registration','tax_number','creation_date','city','company_commune','company_neighborhood','headquarters','company_phone','company_whatsapp','company_email','representative_last','representative_first','representative_role','representative_phone','representative_id_type','representative_id_number'];
-  const next={...current};for(const key of keys){if(body[key]!==undefined){if(typeof body[key]!=='string'||body[key].length>180)return json({error:'INVALID_CLIENT_FIELDS'},400);next[key]=body[key].trim()}}
-  const mandatory=client.kind==='PERSON'?['last_name','first_name','birth_date','birth_place','sex','identity_type','identity_number','phone','commune','neighborhood','emergency_name','emergency_phone','emergency_relation']:['company_name','legal_form','company_phone','representative_last','representative_phone','representative_id_type','representative_id_number'];
-  // Legacy clients can have only name/phone; editing must not demand fields never collected.
-  const legacy=!Object.keys(current).length || !current[mandatory[1]];
-  if(!legacy && mandatory.some(k=>!next[k]))return json({error:'INVALID_CLIENT_FIELDS',missing:mandatory.filter(k=>!next[k])},400);
-  if(!nameForClient(next,client.kind))return json({error:'INVALID_CLIENT_FIELDS'},400);
-  const name=client.kind==='PERSON'?`${next.last_name||''} ${next.first_name||''}`.trim():next.company_name;
-  const phone=client.kind==='PERSON'?next.phone:next.company_phone;
-  await db.prepare('UPDATE clients SET name=?,phone=?,details_json=? WHERE id=? AND institution_id=?').bind(name,phone,JSON.stringify(next),clientId,u.institution_id).run();
-  await audit(db,u,'CLIENT_UPDATED',clientId);return json({ok:true});
+ return Math.round(total*100)/100;
+}
+async function computeCompanyActiveApprovisionnementBalanceTotal(env,bankId,scope={}){
+ // V20 — APPROVISIONNEMENTS ACTIFS : on ne retient plus le cumul historique brut.
+ // Pour chaque approvisionnement valide, seul le montant encore disponible après
+ // affectation aux crédits reste actif dans le Compte entreprise.
+ // Exemple : Approvisionnement 115 000 - Crédit financé 115 000 = actif 0.
+ const accountId=companyAccountId(bankId);
+ const rows=(await env.DB.prepare("SELECT id,type,amount,created_at FROM moves WHERE bank_id=? AND account_id=? AND COALESCE(is_voided,0)=0 ORDER BY datetime(created_at) ASC, id ASC").bind(bankId,accountId).all()).results||[];
+ let total=0;
+ for(const m of rows){
+  if(!isCompanyApprovisionnementType(m.type))continue;
+  if(scope&&(scope.year||scope.month||scope.start||scope.end)&&!rowInScope(m,scope))continue;
+  const initial=Math.abs(Number(m.amount||0)||0);
+  if(initial<=0)continue;
+  const used=await usedCreditAmountForApprovisionnementSource(env,bankId,m.id);
+  const active=Math.max(0,Math.round((initial-Math.max(0,Number(used||0)))*100)/100);
+  if(active>0)total+=active;
  }
- return json({error:'INVALID_ACTION'},400);
+ return Math.round(total*100)/100;
 }
-// Gestion des types par institution, sans changement des écritures historiques.
-if(p==='/api/account-types'&&method==='GET'){
- if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);
- const rows=await db.prepare('SELECT id,label,base_kind,active FROM account_types WHERE institution_id=? ORDER BY label').bind(u.institution_id).all();
- return json({items:rows.results});
+async function computeCompanyManualCashflowTotal(env,bankId,scope={}){
+ // Compatibilité interne V20 : trésorerie manuelle = Approvisionnements actifs - Décaissements.
+ const activeAppro=await computeCompanyActiveApprovisionnementBalanceTotal(env,bankId,scope||{});
+ const decaissement=await computeCompanyDecaissementTotal(env,bankId,scope||{});
+ return Math.round((Number(activeAppro||0)-Number(decaissement||0))*100)/100;
 }
-if(p==='/api/account-types'&&method==='POST'){
- if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
- const label=String(body.label||'').trim();if(label.length<3||label.length>70)return json({error:'INVALID_ACCOUNT_TYPE_NAME'},400);
- const exists=await db.prepare('SELECT id FROM account_types WHERE institution_id=? AND lower(label)=lower(?)').bind(u.institution_id,label).first();
- if(exists)return json({error:'TYPE_ALREADY_EXISTS'},409);
- const key=id();await db.prepare("INSERT INTO account_types(id,institution_id,label,base_kind) VALUES(?,?,?,'CURRENT')").bind(key,u.institution_id,label).run();
- await audit(db,u,'ACCOUNT_TYPE_CREATED',key);return json({ok:true,id:key},201);
+async function computeCompanyOfficialBalance(env,bankId,scope={}){
+ // FORMULE OFFICIELLE V20 :
+ // Solde Compte entreprise automatique =
+ //   Total capital crédit effectivement remboursé (plafonné au Crédit accordé)
+ //   + Total Revenu banque
+ //   + Solde des APPROVISIONNEMENTS ACTIFS
+ //   - Décaissements du Compte entreprise.
+ // Un approvisionnement totalement affecté à un crédit n'est donc plus compté
+ // une seconde fois dans le solde. Son capital revient progressivement via les
+ // remboursements de crédit réellement encaissés.
+ const revenue=await computeTotalRevenueBank(env,bankId,scope||{});
+ const repaid=await computeCreditRepaidPrincipalTotal(env,bankId,scope||{});
+ const activeAppro=await computeCompanyActiveApprovisionnementBalanceTotal(env,bankId,scope||{});
+ const decaissement=await computeCompanyDecaissementTotal(env,bankId,scope||{});
+ return Math.round((Number(repaid||0)+Number(revenue||0)+Number(activeAppro||0)-Number(decaissement||0))*100)/100;
 }
-if(p.startsWith('/api/account-types/')&&method==='DELETE'){
- if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
- const typeId=decodeURIComponent(p.slice('/api/account-types/'.length));
- const target=await db.prepare('SELECT id FROM account_types WHERE id=? AND institution_id=? AND active=1').bind(typeId,u.institution_id).first();
- if(!target)return json({error:'ACCOUNT_TYPE_NOT_FOUND'},404);
- // Le type disparaît des choix mais reste en base pour préserver les comptes existants.
- await db.prepare('UPDATE account_types SET active=0 WHERE id=? AND institution_id=?').bind(typeId,u.institution_id).run();
- await audit(db,u,'ACCOUNT_TYPE_ARCHIVED',typeId);return json({ok:true});
+async function updateCompanyAccountStoredBalance(env,bankId){
+ const accountId=companyAccountId(bankId);
+ const official=await computeCompanyOfficialBalance(env,bankId,{});
+ await env.DB.prepare('UPDATE accounts SET balance=? WHERE id=? AND bank_id=?').bind(official,accountId,bankId).run();
+ return official;
 }
-if(p.startsWith('/api/accounts/')&&p.endsWith('/status')&&method==='POST'){
- if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
- const accountId=decodeURIComponent(p.slice('/api/accounts/'.length,-'/status'.length));
- const a=await db.prepare('SELECT id,number,status FROM accounts WHERE id=? AND institution_id=?').bind(accountId,u.institution_id).first();
- if(!a)return json({error:'ACCOUNT_NOT_FOUND'},404);
- const action=body.action;
- if(!['block','unblock'].includes(action))return json({error:'INVALID_ACTION'},400);
- if(action==='block'){
-  if(a.status==='CLOSED')return json({error:'CLOSED_ACCOUNT'},409);
-  const reason=String(body.reason||'').trim();if(reason.length<5||reason.length>500)return json({error:'BLOCK_REASON_REQUIRED'},400);
-  await db.prepare("UPDATE accounts SET status='BLOCKED',block_reason=? WHERE id=? AND institution_id=? AND status!='CLOSED'").bind(reason,accountId,u.institution_id).run();
-  await audit(db,u,'ACCOUNT_BLOCKED',accountId+': '+reason.slice(0,160));
+// V18 — un compte crédit représente une dette à recouvrer, pas une caisse disponible.
+// Le reste à rembourser affiché par l'interface provient du dernier mouvement valide.
+// On reprend donc cette même source côté serveur afin qu'un ancien accounts.balance
+// désynchronisé ne bloque pas à tort un remboursement avec « Solde insuffisant ».
+async function computeCreditOutstandingBalance(env,bankId,acc){
+ if(!acc)return 0;
+ const last=await env.DB.prepare("SELECT balance_after FROM moves WHERE bank_id=? AND account_id=? AND COALESCE(is_voided,0)=0 AND balance_after IS NOT NULL ORDER BY datetime(created_at) DESC, rowid DESC LIMIT 1").bind(bankId,acc.id).first();
+ const fromMove=last&&last.balance_after!==undefined&&last.balance_after!==null?Number(last.balance_after):NaN;
+ if(Number.isFinite(fromMove))return Math.max(0,Math.round(fromMove*100)/100);
+ const stored=Number(acc.balance||0);
+ return Math.max(0,Math.round((Number.isFinite(stored)?stored:0)*100)/100);
+}
+async function syncCreditRepaymentsToCompanyAccount(env,bankId){
+ const accountId=companyAccountId(bankId);
+ const company=await env.DB.prepare('SELECT id FROM accounts WHERE id=? AND bank_id=?').bind(accountId,bankId).first();
+ if(!company)return 0;
+ const credits=(await env.DB.prepare("SELECT id,number,type,credit_amount FROM accounts WHERE bank_id=? AND id<>? AND COALESCE(is_deleted,0)=0 AND lower(COALESCE(status,'Actif')) NOT LIKE '%supprim%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%delete%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%desactiv%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%archive%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%ferme%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%clotur%' AND lower(COALESCE(status,'Actif')) NOT LIKE '%inactif%' AND (lower(COALESCE(type,'')) LIKE '%credit%' OR lower(COALESCE(type,'')) LIKE '%crédit%') AND COALESCE(credit_amount,0)>0 ORDER BY created_at ASC").bind(bankId,accountId).all()).results||[];
+ let inserted=0;
+ for(const acc of credits){
+  const principal=Math.abs(Number(acc.credit_amount||0)||0);
+  if(principal<=0)continue;
+  let remaining=principal;
+  const payments=(await env.DB.prepare("SELECT id,type,description,amount,created_at FROM moves WHERE bank_id=? AND account_id=? AND COALESCE(is_voided,0)=0 ORDER BY datetime(created_at) ASC, id ASC").bind(bankId,acc.id).all()).results||[];
+  for(const m of payments){
+   if(!isCreditPaymentTypeServer(m.type))continue;
+   const paid=Math.abs(Number(m.amount||0)||0);
+   if(paid<=0||remaining<=0)continue;
+   const part=Math.min(paid,remaining);
+   remaining=Math.max(0,remaining-part);
+   if(part<=0)continue;
+   const marker=companyCreditRepaymentSourceMarker(m.id);
+   const exists=await env.DB.prepare('SELECT id FROM moves WHERE bank_id=? AND account_id=? AND description LIKE ? LIMIT 1').bind(bankId,accountId,'%'+marker+'%').first();
+   if(exists)continue;
+   const bal=await computeCompanyOfficialBalance(env,bankId,{});
+   const desc='Alimentation automatique du Compte entreprise par paiement crédit remboursé limité au capital accordé - compte '+String(acc.number||acc.id)+' '+marker;
+   await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after,created_by,created_by_role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+    .bind(uid('MOV'),bankId,accountId,'Paiement crédit remboursé',desc,part,bal,'SYSTEME','Système',m.created_at||new Date().toISOString()).run();
+   inserted+=part;
+  }
+ }
+ await updateCompanyAccountStoredBalance(env,bankId);
+ return Math.round(inserted*100)/100;
+}
+// Ancienne synchronisation du montant crédit accordé : désactivée.
+// Le Compte entreprise est désormais alimenté par les paiements crédits remboursés, pas par le crédit accordé.
+async function syncCreditAmountsToCompanyAccount(env,bankId){return syncCreditRepaymentsToCompanyAccount(env,bankId);}
+async function ensureCompanyAccount(env,bankId){
+ const b=await env.DB.prepare('SELECT id,name,manager,contact,address,email,city,country FROM banks WHERE id=?').bind(bankId).first();
+ if(!b)return;
+ const clientId=companyClientId(bankId), accountId=companyAccountId(bankId), number=companyAccountNumber(bankId);
+ const name=String(b.name||'Banque').trim()||'Banque';
+ const address=String(b.address||[b.city,b.country].filter(Boolean).join(' - ')||'').trim();
+ await env.DB.prepare("INSERT INTO clients(id,bank_id,name,contact,job,address,piece,pass,is_blocked,is_deleted) VALUES(?,?,?,?,?,?,?,?,0,0) ON CONFLICT(id) DO UPDATE SET name=excluded.name,contact=excluded.contact,job=excluded.job,address=excluded.address,piece=excluded.piece,is_deleted=0,is_blocked=0")
+  .bind(clientId,bankId,name,String(b.contact||''),'Compte entreprise de la banque',address,COMPANY_CLIENT_MARKER,'').run();
+ await env.DB.prepare("INSERT INTO accounts(id,bank_id,client_id,number,type,balance,status,is_blocked,block_reason,is_deleted) VALUES(?,?,?,?,?,0,'Actif',0,'',0) ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id,number=excluded.number,type='Compte entreprise',status='Actif',is_deleted=0,is_blocked=0,block_reason='' ")
+  .bind(accountId,bankId,clientId,number,'Compte entreprise').run();
+ await syncCreditAmountsToCompanyAccount(env,bankId);
+}
+
+function json(data,status=200,extraHeaders={}){
+ const headers=new Headers({'content-type':'application/json; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'});
+ for(const [k,v] of Object.entries(extraHeaders||{}))headers.set(k,String(v));
+ return new Response(JSON.stringify(data),{status,headers});
+}
+async function body(req){try{return await req.json()}catch{return {}}}
+function cleanClientText(value,max=180){return String(value??'').replace(/[\u0000-\u001F\u007F]/g,' ').replace(/\s+/g,' ').trim().slice(0,max);}
+function cleanClientDate(value){const v=cleanClientText(value,10);return /^\d{4}-\d{2}-\d{2}$/.test(v)?v:'';}
+function cleanClientType(value){const v=String(value||'').trim().toLowerCase();return v==='personne_morale'?'personne_morale':'personne_physique';}
+function parseClientDetails(value){
+ if(value&&typeof value==='object'&&!Array.isArray(value))return value;
+ try{const parsed=JSON.parse(String(value||'{}'));return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};}catch{return {};}
+}
+function cleanClientImage(value){
+ const raw=String(value||'').trim();if(!raw)return '';
+ if(raw.length>CLIENT_IMAGE_MAX_DATAURL_CHARS)throw json({error:'La photo ou le logo est trop volumineux.'},413);
+ if(!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/i.test(raw))throw json({error:'Format image refusé. Utilisez JPG, PNG ou WebP.'},400);
+ return raw;
+}
+function normalizeClientPayload(input,existingImage=''){
+ const c=input&&typeof input==='object'?input:{};
+ const type=cleanClientType(c.client_type||c.typeClient);
+ const raw=parseClientDetails(c.client_details);
+ const structured=Object.keys(raw).length>0;
+ const media=cleanClientImage(c.photo_logo);
+ let details,name,contact,job,address,piece;
+ if(type==='personne_morale'&&structured){
+  details={
+   typeClient:type,
+   denomination:cleanClientText(raw.denomination||raw.denominationSociale,180),
+   sigle:cleanClientText(raw.sigle,60),
+   formeJuridique:cleanClientText(raw.formeJuridique,80),
+   domaineActivite:cleanClientText(raw.domaineActivite,160),
+   numeroRccmRecepisseAgrement:cleanClientText(raw.numeroRccmRecepisseAgrement,120),
+   numeroContribuable:cleanClientText(raw.numeroContribuable,100),
+   dateCreationEntreprise:cleanClientDate(raw.dateCreationEntreprise),
+   ville:cleanClientText(raw.ville,100),
+   commune:cleanClientText(raw.commune,120),
+   villageQuartier:cleanClientText(raw.villageQuartier,140),
+   siegeSocial:cleanClientText(raw.siegeSocial,180),
+   contactPrincipal:cleanClientText(raw.contactPrincipal,50),
+   whatsapp:cleanClientText(raw.whatsapp,50),
+   emailProfessionnel:cleanClientText(raw.emailProfessionnel,160),
+   logoEntreprise:!!media,
+   representantLegalNom:cleanClientText(raw.representantLegalNom,100),
+   representantLegalPrenoms:cleanClientText(raw.representantLegalPrenoms,160),
+   representantLegalFonction:cleanClientText(raw.representantLegalFonction,100),
+   representantLegalContact:cleanClientText(raw.representantLegalContact,50),
+   representantLegalTypePiece:cleanClientText(raw.representantLegalTypePiece,80),
+   representantLegalNumeroPiece:cleanClientText(raw.representantLegalNumeroPiece,100)
+  };
+  if(!details.denomination||!details.formeJuridique||!details.contactPrincipal||!details.representantLegalNom||!details.representantLegalContact||!details.representantLegalTypePiece||!details.representantLegalNumeroPiece)throw json({error:'Informations obligatoires de la personne morale incomplètes.'},400);
+  if(details.emailProfessionnel&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(details.emailProfessionnel))throw json({error:'Adresse e-mail professionnelle invalide.'},400);
+  name=details.denomination;contact=details.contactPrincipal;job=[details.formeJuridique,details.domaineActivite].filter(Boolean).join(' - ');address=[details.commune,details.villageQuartier,details.ville].filter(Boolean).join(' / ');piece=details.representantLegalNumeroPiece;
+ }else if(type==='personne_physique'&&structured){
+  details={
+   typeClient:type,
+   nom:cleanClientText(raw.nom,100),
+   prenoms:cleanClientText(raw.prenoms,160),
+   dateNaissance:cleanClientDate(raw.dateNaissance),
+   lieuNaissance:cleanClientText(raw.lieuNaissance,140),
+   sexe:['Masculin','Féminin'].includes(String(raw.sexe||''))?String(raw.sexe):'',
+   profession:cleanClientText(raw.profession,140),
+   typePiece:cleanClientText(raw.typePiece,80),
+   numeroPiece:cleanClientText(raw.numeroPiece,100),
+   telephone:cleanClientText(raw.telephone,50),
+   whatsapp:cleanClientText(raw.whatsapp,50),
+   commune:cleanClientText(raw.commune,120),
+   villageQuartier:cleanClientText(raw.villageQuartier,140),
+   personneAContacter:cleanClientText(raw.personneAContacter,160),
+   contactPersonneAContacter:cleanClientText(raw.contactPersonneAContacter,50),
+   lienPersonneAContacter:cleanClientText(raw.lienPersonneAContacter,100),
+   photoClient:!!media
+  };
+  if(!details.nom||!details.prenoms||!details.telephone||!details.typePiece||!details.numeroPiece)throw json({error:'Informations obligatoires de la personne physique incomplètes.'},400);
+  name=[details.nom,details.prenoms].filter(Boolean).join(' ');contact=details.telephone;job=details.profession;address=[details.commune,details.villageQuartier].filter(Boolean).join(' / ');piece=details.numeroPiece;
  }else{
-  if(a.status!=='BLOCKED')return json({error:'ACCOUNT_NOT_BLOCKED'},409);
-  await db.prepare("UPDATE accounts SET status='ACTIVE',block_reason=NULL WHERE id=? AND institution_id=? AND status='BLOCKED'").bind(accountId,u.institution_id).run();
-  await audit(db,u,'ACCOUNT_UNBLOCKED',accountId);
+  name=cleanClientText(c.name||c.nomAffiche,220);if(!name)throw json({error:'Nom obligatoire.'},400);
+  contact=cleanClientText(c.contact,50);job=cleanClientText(c.job,160);address=cleanClientText(c.address,220);piece=cleanClientText(c.piece,100);
+  details={typeClient:type,legacy:true,nom:type==='personne_physique'?name:'',prenoms:'',telephone:contact,numeroPiece:piece,denomination:type==='personne_morale'?name:'',contactPrincipal:contact,photoClient:type==='personne_physique'&&!!media,logoEntreprise:type==='personne_morale'&&!!media};
  }
- return json({ok:true});
+ const detailsJson=JSON.stringify(details);if(detailsJson.length>CLIENT_DETAILS_MAX_CHARS)throw json({error:'Les informations du client sont trop volumineuses.'},413);
+ return {type,name,contact,job,address,piece,details:detailsJson,media};
 }
-// V20 : le calcul officiel exige une ventilation des remboursements et une
-// affectation documentée des approvisionnements. Ces registres ne sont pas
-// présents dans les versions précédentes : ne pas inventer leurs montants.
-if(p==='/api/enterprise-balance-v20'&&method==='GET'){
- if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
- const bank=u.institution_id;
- const counts=await db.prepare("SELECT kind,COALESCE(SUM(amount),0) total FROM enterprise_treasury_entries WHERE institution_id=? GROUP BY kind").bind(bank).all();
- const totals=Object.fromEntries(counts.results.map(x=>[x.kind,Number(x.total)]));
- const treasury=await db.prepare('SELECT balance FROM enterprise_treasury WHERE institution_id=?').bind(bank).first();
- return json({formula:'S = Cr + Rb + Aa - D',official_available:false,
-  capital_repaid:null,bank_revenue:null,active_funding:null,
-  disbursements:totals.DISBURSEMENT||0, supplies_recorded:totals.SUPPLY||0,
-  legacy_treasury_balance:Number(treasury?.balance||0),
-  missing:['credit_principal_repayment_allocations','recognized_revenue_ledger','funding_allocations'],
-  warning:'Solde V20 non calculable tant que les remboursements de capital, revenus reconnus et affectations de financement ne sont pas enregistrés de façon vérifiable. Le solde historique n’est pas un solde V20.'});
+function clientMediaKey(bankId,clientId){return `client-media:${String(bankId)}:${String(clientId)}`;}
+function clientMediaRef(key){return 'kv:'+String(key||'');}
+function isClientMediaRef(value){return String(value||'').startsWith('kv:client-media:');}
+function clientMediaPublicUrl(clientId){return '/api/client/media?id='+encodeURIComponent(String(clientId||''));}
+async function storeClientMedia(env,bankId,clientId,dataUrl){
+ const clean=cleanClientImage(dataUrl);if(!clean)return '';
+ const key=clientMediaKey(bankId,clientId);await env.KV.put(key,clean);return clientMediaRef(key);
 }
-// Compte entreprise indépendant : approvisionnement / décaissement uniquement.
-if(p==='/api/enterprise-treasury'&&method==='GET'){
- if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
- const bank=u.institution_id;
- const [summary,entries]=await db.batch([
-  db.prepare('SELECT balance FROM enterprise_treasury WHERE institution_id=?').bind(bank),
-  db.prepare('SELECT id,kind,amount,balance_after,description,created_at FROM enterprise_treasury_entries WHERE institution_id=? ORDER BY created_at DESC,id DESC LIMIT 30').bind(bank)
- ]);
- return json({balance:Number(summary.results[0]?.balance||0),entries:entries.results});
+async function deleteClientMedia(env,stored){if(isClientMediaRef(stored)){try{await env.KV.delete(String(stored).slice(3));}catch(e){}}}
+function clientImageResponse(dataUrl){
+ const match=/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/i.exec(String(dataUrl||''));
+ if(!match)return new Response('Image introuvable.',{status:404,headers:{'cache-control':'no-store','x-content-type-options':'nosniff'}});
+ try{const binary=atob(match[2]);const bytes=new Uint8Array(binary.length);for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);return new Response(bytes,{status:200,headers:{'content-type':'image/'+match[1].toLowerCase(),'cache-control':'private, max-age=300','x-content-type-options':'nosniff','cross-origin-resource-policy':'same-origin'}});}catch{return new Response('Image invalide.',{status:404,headers:{'cache-control':'no-store','x-content-type-options':'nosniff'}});}
 }
-if(p==='/api/enterprise-treasury'&&method==='POST'){
- if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
- if(!['SUPPLY','DISBURSEMENT'].includes(body.kind)||!money(body.amount)||!within(body.operation_key,100)||typeof body.description!=='string'||body.description.length>500)return json({error:'INVALID_ENTERPRISE_OPERATION'},400);
- const bank=u.institution_id;
- const previous=await db.prepare('SELECT id FROM enterprise_treasury_entries WHERE institution_id=? AND operation_key=?').bind(bank,body.operation_key).first();
- if(previous)return json({ok:true,duplicate:true});
- // Compute a candidate after-balance; trigger enforces the actual balance atomically.
- const record=await db.prepare('SELECT balance FROM enterprise_treasury WHERE institution_id=?').bind(bank).first();
- const balance=Number(record?.balance||0), next=balance+(body.kind==='SUPPLY'?body.amount:-body.amount);
- if(!Number.isSafeInteger(next)||next<0)return json({error:'INSUFFICIENT_ENTERPRISE_FUNDS'},409);
+function hasBindings(env){return !!(env && env.DB && env.KV)}
+function assertSameOrigin(request){
+ if(!['POST','PUT','PATCH','DELETE'].includes(request.method))return;
+ const origin=request.headers.get('origin');
+ if(origin&&origin!==new URL(request.url).origin)throw json({error:'Origine de la requête refusée.'},403);
+}
+function bytesToB64(bytes){let bin='';for(const b of bytes)bin+=String.fromCharCode(b);return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+function b64ToBytes(value){const s=String(value||'').replace(/-/g,'+').replace(/_/g,'/');const padded=s+'='.repeat((4-s.length%4)%4);const bin=atob(padded);return Uint8Array.from(bin,c=>c.charCodeAt(0));}
+function constantTimeEqual(a,b){
+ const aa=new TextEncoder().encode(String(a||'')),bb=new TextEncoder().encode(String(b||''));
+ let diff=aa.length^bb.length;const len=Math.max(aa.length,bb.length);
+ for(let i=0;i<len;i++)diff|=(aa[i%Math.max(aa.length,1)]||0)^(bb[i%Math.max(bb.length,1)]||0);
+ return diff===0;
+}
+function assertPasswordStrength(password){
+ const p=String(password||'');
+ if(p.length<8||p.length>128)return 'Le mot de passe doit contenir entre 8 et 128 caractères.';
+ if(!/[a-z]/.test(p)||!/[A-Z]/.test(p)||!/[0-9]/.test(p)||!/[^A-Za-z0-9]/.test(p))return 'Le mot de passe doit contenir une minuscule, une majuscule, un chiffre et un caractère spécial.';
+ return '';
+}
+async function derivePassword(password,salt,iterations=PASSWORD_ITERATIONS){
+ const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(String(password||'')),{name:'PBKDF2'},false,['deriveBits']);
+ const bits=await crypto.subtle.deriveBits({name:'PBKDF2',hash:'SHA-256',salt,iterations},key,256);
+ return new Uint8Array(bits);
+}
+async function hashPassword(password){
+ const salt=crypto.getRandomValues(new Uint8Array(16));
+ const hash=await derivePassword(password,salt,PASSWORD_ITERATIONS);
+ return `pbkdf2_sha256$${PASSWORD_ITERATIONS}$${bytesToB64(salt)}$${bytesToB64(hash)}`;
+}
+async function verifyPassword(password,stored){
+ const raw=String(stored||'');
+ const parts=raw.split('$');
+ if(parts.length===4&&parts[0]==='pbkdf2_sha256'){
+  const iterations=Number(parts[1]);
+  if(!Number.isInteger(iterations)||iterations<MIN_PASSWORD_ITERATIONS||iterations>MAX_PASSWORD_ITERATIONS)return {ok:false,needsUpgrade:false};
+  try{
+   const actual=await derivePassword(password,b64ToBytes(parts[2]),iterations);
+   const expected=b64ToBytes(parts[3]);
+   let diff=actual.length^expected.length;const len=Math.max(actual.length,expected.length);
+   for(let i=0;i<len;i++)diff|=(actual[i%Math.max(actual.length,1)]||0)^(expected[i%Math.max(expected.length,1)]||0);
+   return {ok:diff===0,needsUpgrade:diff===0&&iterations<PASSWORD_ITERATIONS};
+  }catch{return {ok:false,needsUpgrade:false};}
+ }
+ // Compatibilité de migration : ancien mot de passe en clair, immédiatement rehaché après une connexion réussie.
+ const ok=constantTimeEqual(password,raw);
+ return {ok,needsUpgrade:ok};
+}
+async function sha256Hex(value){const d=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(String(value||''))));return Array.from(d,b=>b.toString(16).padStart(2,'0')).join('');}
+function clientIp(request){return request.headers.get('cf-connecting-ip')||request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()||'unknown';}
+async function rateKeys(request,login){
+ const account=await sha256Hex(norm(login));const ip=await sha256Hex(clientIp(request));
+ return {account:`login-limit:account:${account}`,ip:`login-limit:ip:${ip}`};
+}
+async function readRate(env,key){try{return JSON.parse(await env.KV.get(key)||'{}')}catch{return {}}}
+async function checkLoginLimit(env,request,login){
+ const keys=await rateKeys(request,login);const now=Math.floor(Date.now()/1000);
+ for(const key of [keys.account,keys.ip]){const r=await readRate(env,key);if(Number(r.blockedUntil||0)>now)return {blocked:true,retryAfter:Number(r.blockedUntil)-now,keys};}
+ return {blocked:false,retryAfter:0,keys};
+}
+async function bumpRate(env,key,limit){
+ const now=Math.floor(Date.now()/1000);let r=await readRate(env,key);
+ if(!r.windowStarted||now-Number(r.windowStarted)>LOGIN_WINDOW_SECONDS)r={count:0,windowStarted:now,blockedUntil:0};
+ r.count=Number(r.count||0)+1;
+ if(r.count>=limit)r.blockedUntil=now+LOGIN_BLOCK_SECONDS;
+ await env.KV.put(key,JSON.stringify(r),{expirationTtl:Math.max(LOGIN_WINDOW_SECONDS,LOGIN_BLOCK_SECONDS)+60});
+ return r;
+}
+async function recordLoginFailure(env,request,login){
+ const keys=await rateKeys(request,login);const [a,i]=await Promise.all([bumpRate(env,keys.account,LOGIN_ACCOUNT_LIMIT),bumpRate(env,keys.ip,LOGIN_IP_LIMIT)]);const now=Math.floor(Date.now()/1000);
+ return Math.max(0,Number(a.blockedUntil||0)-now,Number(i.blockedUntil||0)-now);
+}
+async function clearAccountLoginFailures(env,request,login){const keys=await rateKeys(request,login);await env.KV.delete(keys.account);}
+function parseCookies(request){const out={};for(const part of String(request.headers.get('cookie')||'').split(';')){const i=part.indexOf('=');if(i>0)out[part.slice(0,i).trim()]=decodeURIComponent(part.slice(i+1).trim());}return out;}
+function sessionCookie(request,token){const secure=new URL(request.url).protocol==='https:'?'; Secure':'';return `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly${secure}; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL}`;}
+function clearSessionCookie(request){const secure=new URL(request.url).protocol==='https:'?'; Secure':'';return `${SESSION_COOKIE}=; HttpOnly${secure}; SameSite=Strict; Path=/; Max-Age=0`;}
+function superLogin(env){return String(env.SUPER_ADMIN_LOGIN||'').trim();}
+function superSessionVersion(env){return String(env.SUPER_ADMIN_SESSION_VERSION||'').trim();}
+function ensureSuperSecrets(env){return !!(superLogin(env)&&String(env.SUPER_ADMIN_PASSWORD||'')&&superSessionVersion(env));}
+function loginReserved(env,login){return !!superLogin(env)&&norm(login)===norm(superLogin(env));}
+async function loginExists(env,login,exclude={}){
+ const b=await env.DB.prepare('SELECT id FROM banks WHERE login=? AND id<>? LIMIT 1').bind(login,String(exclude.bankId||'')).first();if(b)return true;
+ const u=await env.DB.prepare('SELECT id FROM users WHERE login=? AND id<>? LIMIT 1').bind(login,String(exclude.userId||'')).first();return !!u;
+}
+
+function cleanSupportText(value,max){return String(value||'').replace(/\u0000/g,'').trim().slice(0,max);}
+function normalizeSupportCategory(value){return norm(value)==='note'?'note':'message';}
+function supportMessageSelect(){return `SELECT m.id,m.broadcast_id,m.sender_type,m.sender_bank_id,m.recipient_bank_id,m.category,m.subject,m.body,m.bank_read_at,m.super_read_at,m.deleted_by_bank,m.deleted_by_super,m.created_by,m.created_at,b.name AS bank_name,b.manager AS bank_manager FROM support_messages m LEFT JOIN banks b ON b.id=m.recipient_bank_id`;}
+function safeSupportMessagePayload(raw){
+ const category=normalizeSupportCategory(raw&&raw.category);
+ const subject=cleanSupportText(raw&&raw.subject,SUPPORT_MESSAGE_SUBJECT_MAX_CHARS);
+ const content=cleanSupportText(raw&&(raw.body||raw.content),SUPPORT_MESSAGE_BODY_MAX_CHARS);
+ if(!subject)return {error:'Objet obligatoire.'};
+ if(!content)return {error:'Contenu obligatoire.'};
+ return {category,subject,body:content};
+}
+async function listBankSupportMessages(env,bankId){
+ const rows=await env.DB.prepare(supportMessageSelect()+" WHERE m.recipient_bank_id=? AND COALESCE(m.deleted_by_bank,0)=0 ORDER BY m.created_at DESC LIMIT 1000").bind(bankId).all();
+ return rows.results||[];
+}
+async function listSuperSupportMessages(env){
+ const rows=await env.DB.prepare(supportMessageSelect()+" WHERE COALESCE(m.deleted_by_super,0)=0 ORDER BY m.created_at DESC LIMIT 3000").all();
+ return rows.results||[];
+}
+
+async function ensureSchema(env){if(schemaReady)return; await env.DB.exec(SCHEMA); const bankCols=[
+  "email TEXT DEFAULT ''","slogan TEXT DEFAULT ''","logo TEXT DEFAULT ''","stamp TEXT DEFAULT ''","signature TEXT DEFAULT ''",
+  "primary_color TEXT DEFAULT '#003b3b'","secondary_color TEXT DEFAULT '#e7ad2f'",
+  "footer_text TEXT DEFAULT 'Document généré automatiquement'","legal_mentions TEXT DEFAULT ''","cga_conditions TEXT DEFAULT ''",
+  "currency TEXT DEFAULT 'FCFA'","country TEXT DEFAULT ''","city TEXT DEFAULT ''",
+  "subscription_started_at TEXT","subscription_expires_at TEXT","subscription_updated_at TEXT","auth_version INTEGER NOT NULL DEFAULT 1"
+ ]; for(const col of bankCols){try{await env.DB.exec('ALTER TABLE banks ADD COLUMN '+col)}catch(e){}}
+ try{await env.DB.prepare("UPDATE banks SET subscription=CASE WHEN upper(COALESCE(subscription,'')) IN ('FREE','STANDARD','BUSINESS','ULTIMATE') THEN upper(subscription) ELSE 'FREE' END WHERE COALESCE(subscription,'')<>''").run();}catch(e){}
+ try{await env.DB.prepare("UPDATE banks SET subscription='FREE' WHERE COALESCE(subscription,'')=''").run();}catch(e){}
+ try{await env.DB.prepare("UPDATE banks SET subscription_started_at=COALESCE(NULLIF(subscription_started_at,''),created_at,datetime('now'))").run();}catch(e){}
+ try{await env.DB.prepare("UPDATE banks SET subscription_expires_at=CASE WHEN COALESCE(subscription_expires_at,'')='' THEN datetime(COALESCE(subscription_started_at,created_at,datetime('now')), CASE WHEN subscription='BUSINESS' THEN '+365 days' WHEN subscription='STANDARD' THEN '+30 days' WHEN subscription='ULTIMATE' THEN '+100 years' ELSE '+20 days' END) ELSE subscription_expires_at END").run();}catch(e){}
+ try{await env.DB.prepare("UPDATE banks SET subscription_updated_at=COALESCE(NULLIF(subscription_updated_at,''),subscription_started_at,created_at,datetime('now'))").run();}catch(e){}
+ try{await env.DB.exec('CREATE TABLE IF NOT EXISTS security_logs (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,action TEXT,section TEXT,result TEXT,agent TEXT,created_at TEXT NOT NULL DEFAULT (datetime(\'now\')))')}catch(e){} const accountCols=['credit_fee REAL DEFAULT 0','credit_carnet_fee REAL DEFAULT 0','credit_amount REAL DEFAULT 0','credit_rate REAL DEFAULT 0','credit_duration INTEGER DEFAULT 0','credit_monthly REAL DEFAULT 0','credit_due_count INTEGER DEFAULT 0','credit_penalty_rate REAL DEFAULT 0','credit_total REAL DEFAULT 0',"credit_choice TEXT DEFAULT \"\"",'is_blocked INTEGER NOT NULL DEFAULT 0',"block_reason TEXT DEFAULT ''",'is_deleted INTEGER NOT NULL DEFAULT 0']; for(const col of accountCols){try{await env.DB.exec('ALTER TABLE accounts ADD COLUMN '+col)}catch(e){}} const obligationCols=["base_type TEXT DEFAULT 'Bénéfice général'","base_item TEXT DEFAULT ''"]; for(const col of obligationCols){try{await env.DB.exec('ALTER TABLE obligations ADD COLUMN '+col)}catch(e){}} for(const col of ['is_active INTEGER NOT NULL DEFAULT 1']){try{await env.DB.exec('ALTER TABLE account_types ADD COLUMN '+col)}catch(e){} try{await env.DB.exec('ALTER TABLE movement_types ADD COLUMN '+col)}catch(e){}} const movementTypeCols=["category TEXT DEFAULT ''",'is_bank_revenue INTEGER',"description TEXT DEFAULT ''"]; for(const col of movementTypeCols){try{await env.DB.exec('ALTER TABLE movement_types ADD COLUMN '+col)}catch(e){}} for(const col of ['is_blocked INTEGER NOT NULL DEFAULT 0','is_deleted INTEGER NOT NULL DEFAULT 0',"client_type TEXT DEFAULT 'personne_physique'","client_details TEXT DEFAULT ''","photo_logo TEXT DEFAULT ''"]){try{await env.DB.exec('ALTER TABLE clients ADD COLUMN '+col)}catch(e){}}
+ const userCols=["status TEXT NOT NULL DEFAULT 'Actif'","permissions TEXT DEFAULT '{\"allow\":[],\"deny\":[]}'","last_login TEXT DEFAULT ''","auth_version INTEGER NOT NULL DEFAULT 1","is_deleted INTEGER NOT NULL DEFAULT 0"]; for(const col of userCols){try{await env.DB.exec('ALTER TABLE users ADD COLUMN '+col)}catch(e){}}
+ const moveCols=["created_by TEXT DEFAULT ''","created_by_role TEXT DEFAULT ''","is_voided INTEGER NOT NULL DEFAULT 0","voided_by TEXT DEFAULT ''","voided_at TEXT DEFAULT ''","void_reason TEXT DEFAULT ''"]; for(const col of moveCols){try{await env.DB.exec('ALTER TABLE moves ADD COLUMN '+col)}catch(e){}}
+ const secCols=["role TEXT DEFAULT ''","motif TEXT DEFAULT ''","user_id TEXT DEFAULT ''","permission TEXT DEFAULT ''","route TEXT DEFAULT ''","resource TEXT DEFAULT ''"]; for(const col of secCols){try{await env.DB.exec('ALTER TABLE security_logs ADD COLUMN '+col)}catch(e){}}
+ try{await env.DB.exec(`CREATE TABLE IF NOT EXISTS security_logs (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,action TEXT,section TEXT,result TEXT,agent TEXT,role TEXT DEFAULT '',motif TEXT DEFAULT '',user_id TEXT DEFAULT '',permission TEXT DEFAULT '',route TEXT DEFAULT '',resource TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')))`)}catch(e){}
+ try{await env.DB.exec(`CREATE TABLE IF NOT EXISTS operation_requests (id TEXT PRIMARY KEY,bank_id TEXT NOT NULL,movement_id TEXT NOT NULL,requested_by TEXT NOT NULL,requested_by_name TEXT DEFAULT '',requested_by_role TEXT NOT NULL,request_type TEXT NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',reviewed_by TEXT DEFAULT '',reviewed_at TEXT DEFAULT '',review_note TEXT DEFAULT '',created_at TEXT NOT NULL DEFAULT (datetime('now')))`)}catch(e){}
+ for(const sql of [
+  'CREATE INDEX IF NOT EXISTS idx_clients_bank ON clients(bank_id)',
+  'CREATE INDEX IF NOT EXISTS idx_accounts_bank ON accounts(bank_id)',
+  'CREATE INDEX IF NOT EXISTS idx_moves_bank ON moves(bank_id)',
+  'CREATE INDEX IF NOT EXISTS idx_users_bank ON users(bank_id)',
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_global ON users(login) WHERE login IS NOT NULL AND login<>''",
+  'CREATE INDEX IF NOT EXISTS idx_support_messages_bank ON support_messages(recipient_bank_id,created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_support_messages_super ON support_messages(deleted_by_super,created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_support_messages_broadcast ON support_messages(broadcast_id)',
+  'CREATE INDEX IF NOT EXISTS idx_operation_requests_bank ON operation_requests(bank_id,created_at)',
+  'CREATE INDEX IF NOT EXISTS idx_operation_requests_user ON operation_requests(bank_id,requested_by,created_at)'
+ ]){try{await env.DB.exec(sql)}catch(e){}}
+ schemaReady=true;}
+
+async function managementSettings(env,bankId){
+ const now=new Date();
+ const currentYear=now.getUTCFullYear(),currentMonth=now.getUTCMonth()+1;
+ const currentMonthStart=`${currentYear}-${String(currentMonth).padStart(2,'0')}-01`;
+ let row=await env.DB.prepare('SELECT * FROM management_settings WHERE bank_id=?').bind(bankId).first();
+ if(!row){
+  row={bank_id:bankId,year:currentYear,month:currentMonth,status:'open',updated_at:now.toISOString()};
+  try{await env.DB.prepare('INSERT INTO management_settings(bank_id,year,month,status) VALUES(?,?,?,?)').bind(bankId,row.year,row.month,row.status).run();}catch(e){}
+  return row;
+ }
+ // Bascule calendrier automatique : si l'exercice n'a pas été touché depuis le début
+ // du mois courant, il avance tout seul sur le mois réel et repart ouvert.
+ // Une consultation historique choisie manuellement pendant le mois reste donc possible.
+ const updatedDay=String(row.updated_at||'').slice(0,10);
+ const storedPeriod=Number(row.year||0)*100+Number(row.month||0);
+ const currentPeriod=currentYear*100+currentMonth;
+ if(storedPeriod<currentPeriod&&(!updatedDay||updatedDay<currentMonthStart)){
+  row={...row,year:currentYear,month:currentMonth,status:'open',updated_at:now.toISOString()};
+  try{
+   await env.DB.prepare("UPDATE management_settings SET year=?,month=?,status='open',updated_at=datetime('now') WHERE bank_id=?").bind(currentYear,currentMonth,bankId).run();
+  }catch(e){}
+ }
+ return row;
+}
+async function rejectIfExerciseClosed(env,bankId){const s=await managementSettings(env,bankId);const st=String(s.status||'open').toLowerCase();if(st==='locked'||st==='closed')throw json({error:'Exercice '+(st==='locked'?'verrouillé':'clôturé')+' : modification impossible. Consultation et impression restent autorisées.'},403);}
+
+async function addLog(env,bankId,message){await env.DB.prepare('INSERT INTO logs(id,bank_id,message) VALUES(?,?,?)').bind(uid('LOG'),bankId,message).run();}
+function canonicalRole(v){const n=norm(v);if(n.includes('super'))return 'super_admin';if(n.includes('administrateur')||n==='admin'||n.includes('admin banque'))return 'admin_bank';if(n.includes('caisse')||n.includes('caissier'))return 'agent_caisse';if(n.includes('credit'))return 'agent_credit';if(n.includes('audit')||n.includes('consult'))return 'auditeur';return 'auditeur';}
+function roleLabel(v){const k=canonicalRole(v);return {super_admin:'Super Admin',admin_bank:'Administrateur banque',agent_caisse:'Agent caisse',agent_credit:'Agent crédit',auditeur:'Agent consultation / auditeur'}[k]||'Agent consultation / auditeur';}
+const ROLE_PERMISSIONS=Object.freeze({
+ admin_bank:['clients.read','clients.create','clients.update','clients.block','clients.unblock','clients.delete','clients.restore','accounts.read','accounts.create','accounts.update','accounts.block','accounts.unblock','accounts.close','accounts.delete','accounts.restore','moves.read.all','moves.create.all','moves.correct','credits.manage','credit_accounts.read','credit_accounts.create','credits.create','credits.update.draft','credits.schedule.generate','credit_payments.create','credits.penalties.apply','credit_movements.read','credit_documents.print','credit_reports.read.limited','users.manage.agents','reports.read.all','settings.manage','security.read','exercises.manage','messages.manage','correction.request','correction.review','receipts.print','documents.print','profile.read.own'],
+ agent_caisse:['clients.read','accounts.read','moves.create.deposit','moves.create.withdrawal','moves.create.cashier_fees','moves.read.own','receipts.print','correction.request','profile.read.own'],
+ agent_credit:['clients.read','credit_accounts.read','credit_accounts.create','credits.create','credits.update.draft','credits.schedule.generate','moves.create.approvisionnement','credit_payments.create','credits.penalties.apply','moves.create.credit_carnet','credit_movements.read','credit_documents.print','credit_reports.read.limited','correction.request','profile.read.own'],
+ auditeur:['clients.read','accounts.read','moves.read','credits.read','reports.read.limited','documents.print','correction.request','profile.read.own']
+});
+const ROLE_EXTRA_PERMISSIONS=Object.freeze({
+ agent_caisse:['clients.create','clients.update.basic'],
+ agent_credit:['clients.create','clients.update.basic'],
+ auditeur:[]
+});
+function parsePermissionPolicy(v){
+ if(v&&typeof v==='object'&&!Array.isArray(v))return {allow:Array.isArray(v.allow)?v.allow.map(String):[],deny:Array.isArray(v.deny)?v.deny.map(String):[]};
+ try{const x=JSON.parse(String(v||'{}'));if(x&&typeof x==='object'&&!Array.isArray(x))return {allow:Array.isArray(x.allow)?x.allow.map(String):[],deny:Array.isArray(x.deny)?x.deny.map(String):[]};}catch(e){}
+ return {allow:[],deny:[]};
+}
+function defaultPermissionsForRole(v){return [...(ROLE_PERMISSIONS[canonicalRole(v)]||[])];}
+function effectivePermissions(role,raw){
+ const key=canonicalRole(role);if(key==='super_admin'||key==='admin_bank')return ['ALL'];
+ const base=new Set(defaultPermissionsForRole(key));const policy=parsePermissionPolicy(raw);const allowedExtra=new Set(ROLE_EXTRA_PERMISSIONS[key]||[]);
+ for(const permission of policy.deny)base.delete(String(permission));
+ for(const permission of policy.allow)if(allowedExtra.has(String(permission)))base.add(String(permission));
+ return [...base].sort();
+}
+function sessionPermissions(s){if(!s)return [];return effectivePermissions(s.userRole||'',s.userPermissions||s.permissions||{});}
+function hasPermission(s,key){const p=sessionPermissions(s);return p.includes('ALL')||p.includes(key);}
+function safePermissionsPayload(v,role){return effectivePermissions(role,v);}
+function safePermissionPolicy(v,role){
+ const key=canonicalRole(role);const policy=parsePermissionPolicy(v);const extras=new Set(ROLE_EXTRA_PERMISSIONS[key]||[]);const defaults=new Set(ROLE_PERMISSIONS[key]||[]);
+ return {allow:[...new Set(policy.allow.filter(x=>extras.has(String(x))).map(String))],deny:[...new Set(policy.deny.filter(x=>defaults.has(String(x))).map(String))]};
+}
+async function addSecurityLog(env,bankId,ctx,action,section,result='autorisé',motif='',meta={}){
+ try{await env.DB.prepare('INSERT INTO security_logs(id,bank_id,action,section,result,agent,role,motif,user_id,permission,route,resource) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').bind(uid('SEC'),bankId||'',String(action||''),String(section||''),String(result||''),String((ctx&&ctx.userName)||'Super Admin'),roleLabel((ctx&&ctx.userRole)||ctx?.role||''),String(motif||''),String((ctx&&ctx.userId)||''),String(meta.permission||''),String(meta.route||''),String(meta.resource||'')).run();}catch(e){}
+}
+function sessionRoleKey(s){if(!s)return '';if(s.role==='super')return 'super_admin';return canonicalRole(s.userRole||'');}
+async function denyRole(env,bankId,s,action,section,motif,permission='',route=''){await addSecurityLog(env,bankId,s,action,section,'refusé',motif,{permission,route});return json({error:'Accès refusé. Permission requise : '+(permission||'autorisation serveur')+'.'},403);}
+function movePermissionForType(type){
+ const t=norm(type);
+ if(t==='depot')return 'moves.create.deposit';
+ if(t==='retrait')return 'moves.create.withdrawal';
+ if(t==='approvisionnement')return 'moves.create.approvisionnement';
+ if(t==='paiement credit'||t==='paiement de credit'||t.includes('remboursement credit'))return 'credit_payments.create';
+ if(t==='frais de penalite de retard'||t==='frais de penalites de retard'||t.includes('penalite de retard'))return 'credits.penalties.apply';
+ if(t==='frais de carnet credit')return 'moves.create.credit_carnet';
+ if(movementTypeInList(type,CASHIER_MOVEMENT_TYPES))return 'moves.create.cashier_fees';
+ return 'moves.create.all';
+}
+async function permissionForRequest(path,request){
+ const method=request.method.toUpperCase();
+ if(path==='/api/logout'||path==='/api/security/log')return null;
+ if((path==='/api/me'||path==='/api/load')&&method==='GET')return 'profile.read.own';
+ if(path==='/api/client/media'&&method==='GET')return 'clients.read';
+ if(path==='/api/messages'||path.startsWith('/api/messages/'))return 'messages.manage';
+ if(path==='/api/admin/verify-password')return 'settings.manage';
+ if(path==='/api/bank/update')return 'settings.manage';
+ if(path==='/api/client'&&method==='POST')return 'clients.create';
+ if(path==='/api/client/update'&&method==='POST')return 'clients.update';
+ if(path==='/api/client/block'&&method==='POST')return 'clients.block';
+ if(path==='/api/client/delete'&&method==='POST')return 'clients.delete';
+ if(path==='/api/client/restore'&&method==='POST')return 'clients.restore';
+ if(path==='/api/account'&&method==='POST'){let b={};try{b=await request.clone().json();}catch(e){}return isCreditAccountType(b.type)?'credit_accounts.create':'accounts.create';}
+ if(path==='/api/account/block'&&method==='POST')return 'accounts.block';
+ if(path==='/api/account/delete'&&method==='POST')return 'accounts.delete';
+ if(path==='/api/account/restore'&&method==='POST')return 'accounts.restore';
+ if(path==='/api/move'&&method==='POST'){let b={};try{b=await request.clone().json();}catch(e){}return movePermissionForType(b.type);}
+ if(path==='/api/move/delete'&&method==='POST')return 'moves.correct';
+ if(path==='/api/correction-requests'&&method==='GET')return 'correction.request';
+ if(path==='/api/correction-requests'&&method==='POST')return 'correction.request';
+ if(path==='/api/correction-requests/review'&&method==='POST')return 'correction.review';
+ if(path==='/api/user'||path.startsWith('/api/user/')||path==='/api/settings/user-reset')return 'users.manage.agents';
+ if(path==='/api/management/settings'||path==='/api/management/status'||path==='/api/save')return 'exercises.manage';
+ if(path.startsWith('/api/settings/')||path.startsWith('/api/revenue'))return 'settings.manage';
+ if(method==='GET')return null;
+ return '__DENY__';
+}
+async function enforceRoleApiAccess(env,bankId,s,path,request){
+ const required=await permissionForRequest(path,request);if(required===null)return null;
+ if(required==='__DENY__')return denyRole(env,bankId,s,'Route interdite','Sécurité',`Route non autorisée : ${path}`,'',path);
+ if(hasPermission(s,required))return null;
+ if(path==='/api/client/update'&&hasPermission(s,'clients.update.basic'))return null;
+ return denyRole(env,bankId,s,'Action refusée','Sécurité',`Permission absente pour ${path}`,required,path);
+}
+async function createSession(env,payload){const token=crypto.randomUUID().replace(/-/g,'')+crypto.randomUUID().replace(/-/g,'');await env.KV.put('session:'+token,JSON.stringify({...payload,issuedAt:Date.now()}),{expirationTtl:SESSION_TTL});return token;}
+async function getSession(req,env){
+ const token=parseCookies(req)[SESSION_COOKIE]||'';if(!token)return null;
+ const raw=await env.KV.get('session:'+token);if(!raw)return null;
+ let s;try{s=JSON.parse(raw)}catch{await env.KV.delete('session:'+token);return null;}
+ if(s.role==='client'){
+  const c=await env.DB.prepare('SELECT id,bank_id,name,is_blocked,is_deleted FROM clients WHERE id=? AND bank_id=? LIMIT 1').bind(s.clientId||'',s.bankId||'').first();
+  if(!c||Number(c.is_blocked)||Number(c.is_deleted)){await env.KV.delete('session:'+token);return null;}
+  return {...s,userName:c.name,token};
+ }
+ if(s.role==='super'){
+  if(!ensureSuperSecrets(env)||String(s.authVersion||'')!==superSessionVersion(env)){await env.KV.delete('session:'+token);return null;}
+  return {...s,token};
+ }
+ if(s.role!=='bank'||!s.bankId){await env.KV.delete('session:'+token);return null;}
+ if(s.userId){
+  const u=await env.DB.prepare('SELECT bank_id,name,login,role,status,permissions,auth_version,is_deleted FROM users WHERE id=? LIMIT 1').bind(s.userId).first();
+  if(!u||String(u.bank_id)!==String(s.bankId)||String(u.status||'Actif')!=='Actif'||Number(u.is_deleted||0)===1||Number(u.auth_version||1)!==Number(s.authVersion||1)){await env.KV.delete('session:'+token);return null;}
+  const bankState=await env.DB.prepare('SELECT status FROM banks WHERE id=? LIMIT 1').bind(s.bankId).first();if(!bankState||!['Actif','Expiré'].includes(String(bankState.status||'Actif'))){await env.KV.delete('session:'+token);return null;}
+  return {...s,userName:u.name||u.login,userLogin:u.login,userRole:u.role,userPermissions:u.permissions,token};
+ }
+ const b=await env.DB.prepare('SELECT id,manager,login,status,auth_version FROM banks WHERE id=? LIMIT 1').bind(s.bankId).first();
+ if(!b||String(b.status||'Actif')==='Suspendu'||Number(b.auth_version||1)!==Number(s.authVersion||1)){await env.KV.delete('session:'+token);return null;}
+ return {...s,userName:b.manager||'Administrateur banque',userLogin:b.login,userRole:'Administrateur banque',token};
+}
+async function requireSession(req,env){const s=await getSession(req,env);if(!s)throw json({error:'Session expirée. Reconnectez-vous.'},401,{'set-cookie':clearSessionCookie(req)});return s;}
+function dbDateToDate(v){if(!v)return null;const raw=String(v).trim();if(!raw)return null;const iso=raw.includes('T')?raw:raw.replace(' ','T')+'Z';const d=new Date(iso);return isNaN(d.getTime())?null:d;}
+function dbDateText(d){const z=n=>String(n).padStart(2,'0');return `${d.getUTCFullYear()}-${z(d.getUTCMonth()+1)}-${z(d.getUTCDate())} ${z(d.getUTCHours())}:${z(d.getUTCMinutes())}:${z(d.getUTCSeconds())}`;}
+function addDaysDate(d,days){const x=new Date(d.getTime());x.setUTCDate(x.getUTCDate()+days);return x;}
+function planCode(v){const x=String(v||'FREE').trim().toUpperCase();return SUBSCRIPTION_PLANS[x]?x:'FREE';}
+function planDays(v){return SUBSCRIPTION_PLANS[planCode(v)].days;}
+function subscriptionInfo(bank){
+ const plan=planCode(bank&&bank.subscription); const meta=SUBSCRIPTION_PLANS[plan]; const start=dbDateToDate(bank&&bank.subscription_started_at)||dbDateToDate(bank&&bank.created_at)||new Date(); const unlimited=plan==='ULTIMATE';
+ const end=unlimited?null:(dbDateToDate(bank&&bank.subscription_expires_at)||addDaysDate(start,meta.days)); const now=new Date();
+ const diff=unlimited?Infinity:end.getTime()-now.getTime(); const days=unlimited?null:Math.max(0,Math.ceil(diff/86400000)); const expired=!unlimited&&diff<0;
+ return {subscription:plan,subscription_label:meta.label,subscription_started_at:bank&&bank.subscription_started_at?bank.subscription_started_at:dbDateText(start),subscription_expires_at:unlimited?'':(bank&&bank.subscription_expires_at?bank.subscription_expires_at:dbDateText(end)),days_remaining:days,subscription_state:expired?'Expiré':(bank&&bank.status==='Suspendu'?'Suspendu':'Actif'),expired,unlimited};
+}
+async function requireActiveBankSubscription(env,bankId){
+ const bank=await env.DB.prepare('SELECT id,status,subscription,subscription_started_at,subscription_expires_at,created_at FROM banks WHERE id=?').bind(bankId).first();
+ if(!bank)throw json({error:'Banque introuvable.'},404);
+ const sub=subscriptionInfo(bank);
+ if(bank.status==='Suspendu')throw json({error:'Banque suspendue.'},403);
+ if(sub.expired){try{await env.DB.prepare("UPDATE banks SET status='Expiré' WHERE id=? AND status<>'Suspendu'").bind(bankId).run();}catch(e){} throw json({error:'Abonnement expiré. Choisissez une formule disponible ou contactez le Super Admin.'},403);}
+ return sub;
+}
+function bankListSelect(){return "SELECT id,name,manager,contact,address,login,status,subscription,subscription_started_at,subscription_expires_at,subscription_updated_at,created_at, CAST(MAX(0, (julianday(COALESCE(NULLIF(subscription_expires_at,''),created_at))-julianday('now')+0.9999)) AS INTEGER) AS days_remaining, CASE WHEN datetime(COALESCE(NULLIF(subscription_expires_at,''),created_at)) < datetime('now') THEN 'Expiré' WHEN status='Suspendu' THEN 'Suspendu' ELSE 'Actif' END AS subscription_state FROM banks ORDER BY created_at DESC";}
+
+async function bankPayload(env,bankId,session={}){
+ const bank=await env.DB.prepare('SELECT id,name,manager,contact,address,email,slogan,logo,stamp,signature,primary_color,secondary_color,footer_text,legal_mentions,cga_conditions,currency,country,city,login,status,subscription,subscription_started_at,subscription_expires_at,subscription_updated_at,created_at FROM banks WHERE id=?').bind(bankId).first();
+ if(bank)Object.assign(bank,subscriptionInfo(bank));await seedDefaultCharges(env,bankId);await ensureCompanyAccount(env,bankId);
+ const clientsQ=await env.DB.prepare("SELECT id,bank_id,name,contact,job,address,piece,client_type,client_details,photo_logo,is_blocked,is_deleted,created_at FROM clients WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all();
+ const allClients=(clientsQ.results||[]).map(c=>({...c,photo_logo:isClientMediaRef(c.photo_logo)?clientMediaPublicUrl(c.id):String(c.photo_logo||'')}));
+ const accountsQ=await env.DB.prepare("SELECT * FROM accounts WHERE bank_id=? ORDER BY created_at DESC").bind(bankId).all();const allAccounts=accountsQ.results||[];
+ const movesQ=await env.DB.prepare("SELECT m.* FROM moves m JOIN accounts a ON a.id=m.account_id AND a.bank_id=m.bank_id WHERE m.bank_id=? AND COALESCE(m.is_voided,0)=0 ORDER BY m.created_at DESC LIMIT 1500").bind(bankId).all();const allMoves=movesQ.results||[];
+ const voidedQ=await env.DB.prepare("SELECT * FROM moves WHERE bank_id=? AND COALESCE(is_voided,0)=1 ORDER BY voided_at DESC LIMIT 300").bind(bankId).all();
+ const usersQ=await env.DB.prepare("SELECT id,bank_id,name,login,role,status,permissions,last_login,is_deleted,created_at FROM users WHERE bank_id=? AND COALESCE(is_deleted,0)=0 ORDER BY created_at DESC").bind(bankId).all();
+ const logsQ=await env.DB.prepare('SELECT * FROM logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all();
+ const chargeQ=await env.DB.prepare('SELECT * FROM charge_bases WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const obligationsQ=await env.DB.prepare('SELECT * FROM obligations WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const resetQ=await env.DB.prepare('SELECT * FROM reset_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 100').bind(bankId).all();
+ const accountTypesQ=await env.DB.prepare('SELECT * FROM account_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const movementTypesQ=await env.DB.prepare('SELECT * FROM movement_types WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const manualQ=await env.DB.prepare('SELECT * FROM manual_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const ignoredQ=await env.DB.prepare('SELECT * FROM ignored_revenues WHERE bank_id=? ORDER BY created_at DESC').bind(bankId).all();
+ const securityQ=await env.DB.prepare('SELECT * FROM security_logs WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all();
+ const requestQ=await env.DB.prepare('SELECT * FROM operation_requests WHERE bank_id=? ORDER BY created_at DESC LIMIT 300').bind(bankId).all();
+ const management_settings=await managementSettings(env,bankId);const rk=sessionRoleKey(session);const perms=sessionPermissions(session);const uidValue=String(session.userId||'');
+ const user={id:uidValue,name:session.userName||bank.manager||'Utilisateur',login:session.userLogin||bank.login||'',role:roleLabel(session.userRole||'Administrateur banque'),role_key:rk,permissions:perms,status:'Actif',last_login:session.lastLogin||'',readonly:rk==='auditeur'};
+ const activeClients=allClients.filter(c=>Number(c.is_deleted||0)!==1);const activeAccounts=allAccounts.filter(a=>Number(a.is_deleted||0)!==1&&!norm(a.status).includes('supprim'));
+ const limitedBank={id:bank.id,name:bank.name,manager:bank.manager,contact:bank.contact,address:bank.address,email:bank.email,logo:bank.logo,currency:bank.currency,city:bank.city,country:bank.country,status:bank.status,subscription:bank.subscription,subscription_label:bank.subscription_label,subscription_state:bank.subscription_state,days_remaining:bank.days_remaining};
+ if(rk==='admin_bank')return {bank,user,clients:activeClients,deleted_clients:allClients.filter(c=>Number(c.is_deleted||0)===1),accounts:activeAccounts,deleted_accounts:allAccounts.filter(a=>Number(a.is_deleted||0)===1),moves:allMoves,voided_moves:voidedQ.results||[],users:usersQ.results||[],logs:logsQ.results||[],charge_bases:chargeQ.results||[],obligations:obligationsQ.results||[],reset_requests:resetQ.results||[],account_types:accountTypesQ.results||[],movement_types:movementTypesQ.results||[],manual_revenues:manualQ.results||[],ignored_revenues:ignoredQ.results||[],security_logs:securityQ.results||[],operation_requests:requestQ.results||[],management_settings};
+ if(rk==='agent_caisse'){
+  const accounts=activeAccounts.filter(a=>!isCompanyAccountRow(a,bankId)&&!isCreditAccountType(a.type));const ids=new Set(accounts.map(a=>String(a.id)));const ownMoves=allMoves.filter(m=>String(m.created_by||'')===uidValue&&ids.has(String(m.account_id||'')));
+  return {bank:limitedBank,user,clients:activeClients,accounts,moves:ownMoves,operation_requests:(requestQ.results||[]).filter(r=>String(r.requested_by)===uidValue),account_types:[],movement_types:(movementTypesQ.results||[]).filter(t=>movementTypeInList(t.name,CASHIER_MOVEMENT_TYPES)),management_settings};
+ }
+ if(rk==='agent_credit'){
+  const accounts=activeAccounts.filter(a=>isCreditAccountType(a.type));const ids=new Set(accounts.map(a=>String(a.id)));const moves=allMoves.filter(m=>ids.has(String(m.account_id||'')));
+  const sourceAccount=allAccounts.find(a=>isCompanyAccountRow(a,bankId));const credit_sources=sourceAccount?allMoves.filter(m=>String(m.account_id||'')===String(sourceAccount.id)&&isCompanyApprovisionnementType(m.type)).map(m=>({id:m.id,account_id:m.account_id,type:m.type,description:m.description,amount:m.amount,balance_after:m.balance_after,created_at:m.created_at})):[];
+  const credit_source_account=sourceAccount?{id:sourceAccount.id,client_id:sourceAccount.client_id,number:sourceAccount.number,type:sourceAccount.type,status:sourceAccount.status,is_blocked:sourceAccount.is_blocked}:null;
+  return {bank:limitedBank,user,clients:activeClients,accounts,moves,credit_sources,credit_source_account,operation_requests:(requestQ.results||[]).filter(r=>String(r.requested_by)===uidValue),account_types:[],movement_types:(movementTypesQ.results||[]).filter(t=>movementTypeInList(t.name,CREDIT_AGENT_MOVEMENT_TYPES)),management_settings};
+ }
+ const auditAccounts=activeAccounts.filter(a=>!isCompanyAccountRow(a,bankId));const auditIds=new Set(auditAccounts.map(a=>String(a.id)));return {bank:limitedBank,user,clients:activeClients,accounts:auditAccounts,moves:allMoves.filter(m=>auditIds.has(String(m.account_id||''))),operation_requests:(requestQ.results||[]).filter(r=>String(r.requested_by)===uidValue),account_types:[],movement_types:[],management_settings,report_scope:'limited'};
+}
+async function ensureOukamiInstitution(env){
+ const pwd=String(env.OUKAMI_ADMIN_PASSWORD||'');if(!pwd)return;
+ const exists=await env.DB.prepare("SELECT id FROM banks WHERE name='ASSOCIATION OUKAMI DE DIABO' LIMIT 1").first();if(exists)return;
+ const weak=assertPasswordStrength(pwd);if(weak)throw new Error('OUKAMI_ADMIN_PASSWORD doit être un mot de passe robuste.');
+ const id=uid('BANK');const pass=await hashPassword(pwd);
  try{
-  await db.prepare('INSERT INTO enterprise_treasury_entries(id,institution_id,operation_key,kind,amount,balance_after,description,created_by) VALUES(?,?,?,?,?,?,?,?)').bind(id(),bank,body.operation_key,body.kind,body.amount,next,body.description.trim(),u.id).run();
- }catch(e){
-  if(await db.prepare('SELECT id FROM enterprise_treasury_entries WHERE institution_id=? AND operation_key=?').bind(bank,body.operation_key).first())return json({ok:true,duplicate:true});
-  const err=String(e);
-  if(/INSUFFICIENT_ENTERPRISE_FUNDS|INVALID_ENTERPRISE_BALANCE/.test(err))return json({error:'BALANCE_CHANGED_RETRY'},409);
-  return json({error:'ENTERPRISE_OPERATION_FAILED'},409);
- }
- await audit(db,u,'ENTERPRISE_'+body.kind,body.operation_key);
- return json({ok:true},201);
+  await env.DB.prepare("INSERT INTO banks(id,name,manager,city,country,login,pass,status,subscription,subscription_started_at,subscription_expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)").bind(id,'ASSOCIATION OUKAMI DE DIABO','Administrateur OUKAMI','Diabo','Côte d’Ivoire','admin@oukami.local',pass,'Actif','ULTIMATE',new Date().toISOString(),'').run();
+  await ensureCompanyAccount(env,id);
+ }catch(e){if(!String(e.message||'').includes('UNIQUE'))throw e;}
 }
-if(p==='/api/accounts'&&method==='GET'){
- if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);
- const page=Math.min(10000,Math.max(1,Number(url.searchParams.get('page')||1)));
- const search=String(url.searchParams.get('q')||'').trim().slice(0,100);
- const kind=String(url.searchParams.get('kind')||'').trim().slice(0,80);
- const filter=kind?' AND (a.kind=? OR a.account_type_id=?)':'';
- const match=search?' AND (lower(a.number) LIKE ? OR lower(c.name) LIKE ?)':'';
- const args=[u.institution_id,...(kind?[kind,kind]:[]),...(search?['%'+search.toLowerCase()+'%','%'+search.toLowerCase()+'%']:[])];
- const base=' FROM accounts a JOIN clients c ON c.id=a.client_id LEFT JOIN account_types t ON t.id=a.account_type_id WHERE a.institution_id=?'+filter+match;
- const [rows,total]=await db.batch([
-  db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,a.block_reason,COALESCE(t.label,a.kind) type_label,c.name client'+base+' ORDER BY a.created_at DESC,a.id DESC LIMIT 16 OFFSET ?').bind(...args,(page-1)*15),
-  db.prepare('SELECT COUNT(*) n'+base).bind(...args)
- ]);
- return json({items:rows.results.slice(0,15),has_more:rows.results.length>15,page,total:Number(total.results[0]?.n||0)});
-}
-if(p==='/api/accounts'&&method==='POST'){if(u.role!=='admin')return json({error:'FORBIDDEN'},403);if(!['CURRENT','SAVINGS','DEPOSIT','CREDIT','TERM','COLLECTION'].includes(body.kind))return json({error:'INVALID_ACCOUNT_TYPE'},400);let customId=null;if(body.account_type_id){const t=await db.prepare('SELECT id,base_kind FROM account_types WHERE id=? AND institution_id=? AND active=1').bind(body.account_type_id,u.institution_id).first();if(!t||t.base_kind!==body.kind)return json({error:'INVALID_CUSTOM_ACCOUNT_TYPE'},400);customId=t.id;}const client=await db.prepare('SELECT id FROM clients WHERE id=? AND institution_id=? AND active=1').bind(body.client_id,u.institution_id).first();if(!client)return json({error:'CLIENT_NOT_FOUND'},404);const key=id(),no='MB-'+key.slice(0,12).toUpperCase();const terms=body.terms||{};
-const amountKeys=body.kind==='CREDIT'?['principal','application_fee','book_fee']:body.kind==='TERM'?['principal','application_fee']:['initial_deposit','opening_fee','book_fee'];
-const allowedKeys=[...amountKeys,'annual_rate','rate','months','start_date','credit_type','funding_reference','penalty_rate','bonus_rate'];
-if(typeof terms!=='object'||Array.isArray(terms)||!terms||Object.keys(terms).some(k=>!allowedKeys.includes(k)))return json({error:'INVALID_ACCOUNT_TERMS'},400);
-for(const k of amountKeys){const v=Number(terms[k]||0);if(!Number.isSafeInteger(v)||v<0||v>1000000000000)return json({error:'INVALID_ACCOUNT_TERMS'},400)}
-for(const k of ['annual_rate','rate','bonus_rate','penalty_rate'])if(terms[k]!==undefined&&(!Number.isFinite(Number(terms[k]))||Number(terms[k])<0||Number(terms[k])>100))return json({error:'INVALID_ACCOUNT_RATE'},400);
-if(['CREDIT','TERM'].includes(body.kind)&&(!money(Number(terms.principal))||!Number.isInteger(Number(terms.months))||Number(terms.months)<1||Number(terms.months)>600))return json({error:'INVALID_CONTRACT_TERMS'},400);
-if(terms.start_date&&!/^\d{4}-\d{2}-\d{2}$/.test(terms.start_date))return json({error:'INVALID_CONTRACT_DATE'},400);
-// Les conditions sont des brouillons. Aucun décaissement ni frais ni dépôt n'est comptabilisé ici.
-await db.batch([db.prepare('INSERT INTO accounts(id,institution_id,client_id,number,kind,account_type_id) VALUES(?,?,?,?,?,?)').bind(key,u.institution_id,body.client_id,no,body.kind,customId),db.prepare('INSERT INTO account_contract_drafts(account_id,institution_id,kind,terms_json) VALUES(?,?,?,?)').bind(key,u.institution_id,body.kind,JSON.stringify(terms))]);await audit(db,u,'ACCOUNT_DRAFT_CREATED',key);return json({ok:true,id:key,number:no,draft:true},201)}
-if(p.startsWith('/api/accounts/') && ['GET','DELETE'].includes(method)){
- const accountId=decodeURIComponent(p.slice('/api/accounts/'.length));
- const a=await db.prepare('SELECT a.id,a.number,a.kind,a.balance,a.status,a.block_reason,COALESCE(t.label,a.kind) type_label,c.name client FROM accounts a JOIN clients c ON c.id=a.client_id LEFT JOIN account_types t ON t.id=a.account_type_id WHERE a.id=? AND a.institution_id=?').bind(accountId,u.institution_id).first();
- if(!a)return json({error:'ACCOUNT_NOT_FOUND'},404);
- if(method==='GET'){
-  const t=await db.prepare('SELECT reference,kind,amount,delta,description,created_at FROM transactions WHERE account_id=? AND institution_id=? ORDER BY created_at DESC,id DESC LIMIT 200').bind(accountId,u.institution_id).all();
-  return json({account:a,transactions:t.results});
- }
- if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
- const linked=await db.prepare('SELECT COUNT(*) n FROM transactions WHERE account_id=? AND institution_id=?').bind(accountId,u.institution_id).first();
- if(linked.n>0||a.balance!==0)return json({error:'ACCOUNT_HAS_FINANCIAL_HISTORY',hint:'Un compte mouvementé ne peut être supprimé : clôturez-le selon la procédure réglementaire.'},409);
- await db.prepare('DELETE FROM accounts WHERE id=? AND institution_id=? AND NOT EXISTS (SELECT 1 FROM transactions WHERE account_id=?) AND balance=0').bind(accountId,u.institution_id,accountId).run();
- await audit(db,u,'ACCOUNT_DELETED',accountId);return json({ok:true});
-}
-if(p.startsWith('/api/transactions/') && ['GET','PUT','DELETE'].includes(method)){
- const txId=decodeURIComponent(p.slice('/api/transactions/'.length));
- const tx=await db.prepare('SELECT t.*,a.number account FROM transactions t JOIN accounts a ON a.id=t.account_id WHERE t.id=? AND t.institution_id=?').bind(txId,u.institution_id).first();
- if(!tx)return json({error:'TRANSACTION_NOT_FOUND'},404);
- if(method==='GET')return json({transaction:tx});
- if(u.role!=='admin')return json({error:'FORBIDDEN'},403);
- if(method==='PUT'){
-  // Immutable financial ledger: corrections to amount, dates and accounts are prohibited.
-  // Notes are stored in an append-only audit rather than changing the signed movement.
-  if(!within(body.reason,400))return json({error:'CORRECTION_REASON_REQUIRED'},400);
-  await audit(db,u,'TRANSACTION_CORRECTION_NOTE',tx.reference+' : '+body.reason.trim());
-  return json({ok:true,message:'Note de correction ajoutée au journal. Le mouvement initial reste inchangé.'});
- }
- // A posted movement cannot be deleted. Record a motivated reversal in a separate operation.
- if(!within(body.reason,400))return json({error:'REVERSAL_REASON_REQUIRED'},400);
- if(tx.operation_key.startsWith('REV-'))return json({error:'REVERSAL_NOT_REVERSIBLE'},409);
- const original=await db.prepare('SELECT id,account_id,amount,delta,kind,leg FROM transactions WHERE institution_id=? AND operation_key=? ORDER BY leg').bind(u.institution_id,tx.operation_key).all();
- const reversalKey='REV-'+tx.operation_key;
- if(await db.prepare('SELECT id FROM transactions WHERE institution_id=? AND operation_key=?').bind(u.institution_id,reversalKey).first())return json({error:'ALREADY_REVERSED'},409);
- const reverseKind={DEPOSIT:'WITHDRAWAL',WITHDRAWAL:'DEPOSIT',TRANSFER_IN:'TRANSFER_OUT',TRANSFER_OUT:'TRANSFER_IN'};
- const ref='RV-'+id().slice(0,12).toUpperCase();
- const desc='Contrepassation '+tx.reference+' : '+body.reason.trim();
- // Insert credits before debits to accommodate transfer reversals, D1 batch is atomic.
- const stmts=[...original.results].sort((a,b)=>a.delta-b.delta).map((t,i)=>db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(id(),u.institution_id,reversalKey,i+1,t.account_id,reverseKind[t.kind],t.amount,-t.delta,ref,desc,u.id));
- try{await db.batch(stmts)}catch(e){return json({error:'REVERSAL_REJECTED',hint:'Contrepassation impossible (solde insuffisant, compte ou client bloqué). Aucun mouvement partiel enregistré.'},409)}
- await audit(db,u,'TRANSACTION_REVERSED',tx.reference+' => '+ref);return json({ok:true,reference:ref});
-}
-if(p==='/api/transactions'&&method==='GET'){
- if(u.role==='superadmin')return json({error:'FORBIDDEN'},403);
- const page=Math.min(1000,Math.max(1,Number(url.searchParams.get('page')||1)));
- const q=(url.searchParams.get('q')||'').trim().slice(0,100);
- const where="t.institution_id=?"+(q?" AND (t.reference LIKE ? OR a.number LIKE ? OR c.name LIKE ? OR c.phone LIKE ? OR t.kind LIKE ? OR t.description LIKE ? OR t.created_at LIKE ? OR CAST(t.amount AS TEXT) LIKE ?)":'');
- const params=[u.institution_id,...(q?Array(8).fill('%'+q+'%'):[])];
- const base=' FROM transactions t JOIN accounts a ON a.id=t.account_id JOIN clients c ON c.id=a.client_id WHERE '+where;
- const count=await db.prepare('SELECT COUNT(*) AS total'+base).bind(...params).first();
- const rows=await db.prepare('SELECT t.id,t.reference,t.kind,t.amount,t.delta,t.created_at,t.description,a.number account,c.name client'+base+' ORDER BY t.created_at DESC,t.id DESC LIMIT 21 OFFSET ?').bind(...params,(page-1)*20).all();
- return json({items:rows.results.slice(0,20),has_more:rows.results.length>20,page,total:count.total});
-}
-if(p==='/api/transactions'&&method==='POST'){
- if(!writable(u,'transactions'))return json({error:'FORBIDDEN'},403);if(!['DEPOSIT','WITHDRAWAL','TRANSFER'].includes(body.kind)||!money(body.amount)||!within(body.operation_key,100))return json({error:'INVALID_TRANSACTION'},400);
- const source=await db.prepare('SELECT a.id FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.id=? AND a.institution_id=? AND a.status=? AND c.active=1').bind(body.account_id,u.institution_id,'ACTIVE').first();if(!source)return json({error:'ACCOUNT_NOT_FOUND'},404);
- const op=body.operation_key,ref='TX-'+id().slice(0,12).toUpperCase(),newid=id();const dup=await db.prepare('SELECT reference FROM transactions WHERE institution_id=? AND operation_key=? LIMIT 1').bind(u.institution_id,op).first();if(dup)return json({ok:true,reference:dup.reference,duplicate:true});
- const amt=body.amount,kind=body.kind,desc=String(body.description||'').slice(0,300);
- const commands=[];
- if(kind==='TRANSFER'){if(body.destination_id===body.account_id)return json({error:'SAME_ACCOUNT'},400);const dest=await db.prepare('SELECT a.id FROM accounts a JOIN clients c ON c.id=a.client_id WHERE a.id=? AND a.institution_id=? AND a.status=? AND c.active=1').bind(body.destination_id,u.institution_id,'ACTIVE').first();if(!dest)return json({error:'DESTINATION_NOT_FOUND'},404);commands.push(db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(newid,u.institution_id,op,1,source.id,'TRANSFER_OUT',amt,-amt,ref,desc,u.id));commands.push(db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(id(),u.institution_id,op,2,dest.id,'TRANSFER_IN',amt,amt,ref,desc,u.id))}
- else commands.push(db.prepare('INSERT INTO transactions(id,institution_id,operation_key,leg,account_id,kind,amount,delta,reference,description,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(newid,u.institution_id,op,1,source.id,kind,amt,kind==='DEPOSIT'?amt:-amt,ref,desc,u.id));
- try{await db.batch(commands)}catch(e){const duplicate=await db.prepare('SELECT reference FROM transactions WHERE institution_id=? AND operation_key=? LIMIT 1').bind(u.institution_id,op).first();if(duplicate)return json({ok:true,reference:duplicate.reference,duplicate:true});return json({error:String(e).includes('INSUFFICIENT_FUNDS')?'INSUFFICIENT_FUNDS':'TRANSACTION_REJECTED'},409)}
- await audit(db,u,'TRANSACTION_POSTED',ref);return json({ok:true,reference:ref},201)
-}
-if(p==='/api/admin/institutions'&&u.role==='superadmin'){
- if(method==='GET'){const r=await db.prepare("SELECT i.id,i.name,i.active,i.created_at,(SELECT u.email FROM users u WHERE u.institution_id=i.id AND u.role='admin' ORDER BY u.created_at ASC LIMIT 1) admin_email,(SELECT u.display_name FROM users u WHERE u.institution_id=i.id AND u.role='admin' ORDER BY u.created_at ASC LIMIT 1) admin_name,(SELECT s.plan_code FROM subscriptions s WHERE s.institution_id=i.id ORDER BY s.rowid DESC LIMIT 1) plan_code,(SELECT s.end_at FROM subscriptions s WHERE s.institution_id=i.id ORDER BY s.rowid DESC LIMIT 1) end_at FROM institutions i ORDER BY i.created_at DESC LIMIT 100").all();return json({items:r.results})}
- if(method==='POST'){if(!within(body.name))return json({error:'INVALID_NAME'},400);const key=id();await db.prepare('INSERT INTO institutions(id,name) VALUES(?,?)').bind(key,body.name.trim()).run();await audit(db,u,'INSTITUTION_CREATED',key);return json({ok:true,id:key},201)}
-}
-// Create institution and its first administrator atomically: neither may exist alone.
-// The temporary password is returned only in the authenticated Super Admin response,
-// never logged, persisted in plaintext, put into a URL, or exposed to the new administrator.
-if(p==='/api/admin/institutions-with-admin'&&method==='POST'){
- if(u.role!=='superadmin')return json({error:'FORBIDDEN'},403);
- const institutionName=String(body.institution_name||'').trim();
- const adminName=String(body.admin_name||'').trim();
- const email=String(body.admin_email||'').trim().toLowerCase();
- if(!within(institutionName,160)||!within(adminName,160)||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>160)return json({error:'INVALID_COMPANY_OR_ADMIN'},400);
- const existing=await db.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
- if(existing)return json({error:'EMAIL_ALREADY_USED'},409);
- const institutionId=id(),adminId=id();
- const temporaryPassword=String(body.admin_password||'');
- if(temporaryPassword.length<12||temporaryPassword.length>256)return json({error:'PASSWORD_REQUIREMENTS'},400);
- const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
- const digest=await pbkdf(temporaryPassword,salt,NEW_PASSWORD_ITERATIONS);
+async function handleApi(request,env,path){
  try{
-  await db.batch([
-   db.prepare('INSERT INTO institutions(id,name) VALUES(?,?)').bind(institutionId,institutionName),
-   db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) VALUES(?,?,?,?,?,?,?,?,1,0)').bind(adminId,institutionId,email,adminName,'admin',digest,salt,NEW_PASSWORD_ITERATIONS)
-  ]);
- }catch(err){if(/UNIQUE|constraint/i.test(String(err)))return json({error:'EMAIL_ALREADY_USED_OR_COMPANY_CONFLICT'},409);throw err}
- try{await audit(db,u,'INSTITUTION_AND_ADMIN_CREATED',institutionId)}catch(err){console.error('COMPANY_ADMIN_AUDIT_FAILED')}
- return json({ok:true,institution_id:institutionId,admin_id:adminId,admin_email:email,force_password_change:false},201,{'cache-control':'no-store'});
+  if(request.method==='OPTIONS')return new Response(null,{status:204});
+  assertSameOrigin(request);
+  if(!hasBindings(env))return json({ok:false,error:'Bindings manquants : créez et liez une base D1 avec le nom DB, puis un KV avec le nom KV dans Cloudflare Pages > Settings > Functions > Bindings.'},500);
+  await ensureSchema(env);
+  await ensureOukamiInstitution(env);
+  if(path==='/api/status')return json({ok:true,cloudflare:true,d1:true,kv:true,message:'API connectée. D1 + KV actifs.'});
+  if(path==='/api/register'&&request.method==='POST')return json({error:'Inscription publique désactivée.'},403);
+  if(false && path==='/api/register'&&request.method==='POST'){
+   const b=await body(request);const login=String(b.login||'').trim(),password=String(b.pass||'');
+   if(!b.name||!login||!password)return json({error:'Nom de banque, identifiant et mot de passe obligatoires.'},400);
+   const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);
+   if(loginReserved(env,login)||await loginExists(env,login))return json({error:'Identifiant déjà utilisé.'},409);
+   const id=uid('BANK'),passHash=await hashPassword(password);
+   await env.DB.prepare("INSERT INTO banks(id,name,manager,contact,address,email,city,country,login,pass,auth_version,status,subscription,subscription_started_at,subscription_expires_at,subscription_updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,datetime('now'),datetime('now','+10 days'),datetime('now'))").bind(id,b.name,b.manager||'',b.contact||'',b.address||'',b.email||'',b.city||'',b.country||'',login,passHash,'Actif','FREE').run();
+   await ensureCompanyAccount(env,id);await addLog(env,id,'Banque inscrite en version Free — 10 jours');return json({ok:true,id,subscription:'FREE'});
+  }
+  // Portail client isolé : jamais de données d'autres clients, aucune écriture.
+  if(path==='/api/oukami/client-login'&&request.method==='POST'){
+   const b=await body(request),login=String(b.login||'').trim(),password=String(b.pass||'');
+   if(!login||!password)return json({error:'Identifiants incorrects.'},401);
+   const lim=await checkLoginLimit(env,request,'client:'+login);if(lim.blocked)return json({error:'Trop de tentatives.'},429);
+   const rows=(await env.DB.prepare(`SELECT c.id,c.bank_id,c.name,c.pass,c.is_blocked,c.is_deleted FROM clients c JOIN banks b ON b.id=c.bank_id WHERE b.name='ASSOCIATION OUKAMI DE DIABO' AND (c.id=? OR c.contact=? OR EXISTS(SELECT 1 FROM accounts a WHERE a.client_id=c.id AND a.bank_id=c.bank_id AND a.number=?)) LIMIT 2`).bind(login,login,login).all()).results||[];
+   const client=rows.length===1?rows[0]:null;
+   const fail=async()=>{await recordLoginFailure(env,request,'client:'+login);return json({error:'Identifiants incorrects.'},401);};
+   if(!client||!client.pass||Number(client.is_blocked)||Number(client.is_deleted))return fail();
+   const valid=await verifyPassword(password,client.pass);if(!valid.ok)return fail();
+   if(valid.needsUpgrade){await env.DB.prepare('UPDATE clients SET pass=? WHERE id=? AND bank_id=?').bind(await hashPassword(password),client.id,client.bank_id).run();}
+   await clearAccountLoginFailures(env,request,'client:'+login);
+   const token=await createSession(env,{role:'client',clientId:client.id,bankId:client.bank_id,userName:client.name});
+   return json({ok:true,role:'client'},200,{'set-cookie':sessionCookie(request,token)});
+  }
+  if(path==='/api/oukami/client-me'&&request.method==='GET'){
+   const cs=await requireSession(request,env);if(cs.role!=='client')return json({error:'Accès interdit.'},403);
+   const c=await env.DB.prepare('SELECT id,name,contact FROM clients WHERE id=? AND bank_id=? AND is_deleted=0').bind(cs.clientId,cs.bankId).first();
+   if(!c)return json({error:'Compte indisponible.'},404);
+   const accounts=(await env.DB.prepare('SELECT id,number,type,balance,status,created_at FROM accounts WHERE bank_id=? AND client_id=? ORDER BY created_at DESC LIMIT 100').bind(cs.bankId,cs.clientId).all()).results||[];
+   const moves=(await env.DB.prepare('SELECT m.id,m.account_id,m.type,m.description,m.amount,m.balance_after,m.created_at FROM moves m JOIN accounts a ON a.id=m.account_id AND a.bank_id=m.bank_id WHERE m.bank_id=? AND a.client_id=? AND COALESCE(m.is_voided,0)=0 ORDER BY m.created_at DESC LIMIT 80').bind(cs.bankId,cs.clientId).all()).results||[];
+   return json({role:'client',client:c,accounts,moves});
+  }
+  if(path==='/api/login'&&request.method==='POST'){
+   const b=await body(request);const login=String(b.login||'').trim(),password=String(b.pass||'');
+   if(!login||!password)return json({error:'Identifiant ou mot de passe incorrect.'},401);
+   const limit=await checkLoginLimit(env,request,login);if(limit.blocked)return json({error:'Trop de tentatives. Réessayez plus tard.',retry_after:limit.retryAfter},429,{'retry-after':limit.retryAfter});
+   const failure=async()=>{const retry=await recordLoginFailure(env,request,login);return json({error:retry>0?'Trop de tentatives. Réessayez plus tard.':'Identifiant ou mot de passe incorrect.',...(retry>0?{retry_after:retry}:{})},retry>0?429:401,retry>0?{'retry-after':retry}:{});};
+   if(ensureSuperSecrets(env)&&norm(login)===norm(superLogin(env))){
+    if(!constantTimeEqual(password,String(env.SUPER_ADMIN_PASSWORD||'')))return failure();
+    await clearAccountLoginFailures(env,request,login);
+    const ctx={role:'super',userRole:'Super Admin',userName:'Super Admin',authVersion:superSessionVersion(env)};const token=await createSession(env,ctx);
+    return json({ok:true,role:'super',user:{name:'Super Admin',role:'Super Admin'}},200,{'set-cookie':sessionCookie(request,token)});
+   }
+   const bank=await env.DB.prepare('SELECT * FROM banks WHERE login=? LIMIT 1').bind(login).first();
+   if(bank){
+    const verified=await verifyPassword(password,bank.pass);if(!verified.ok)return failure();
+    if(verified.needsUpgrade){const upgraded=await hashPassword(password);await env.DB.prepare('UPDATE banks SET pass=? WHERE id=?').bind(upgraded,bank.id).run();}
+    if(bank.status==='Suspendu')return json({error:'Banque suspendue.'},403);const sub=subscriptionInfo(bank);if(sub.expired){try{await env.DB.prepare("UPDATE banks SET status='Expiré' WHERE id=? AND status<>'Suspendu'").bind(bank.id).run();}catch(e){}await addSecurityLog(env,bank.id,{userName:bank.manager||'Administrateur banque',userRole:'Administrateur banque'},'Connexion refusée','Connexion','refusé','Abonnement expiré');return json({error:'Abonnement expiré. Choisissez une formule disponible ou contactez le Super Admin.'},403);}
+    await clearAccountLoginFailures(env,request,login);const ctx={role:'bank',bankId:bank.id,userRole:'Administrateur banque',userName:bank.manager||'Administrateur banque',userLogin:bank.login,userId:'',authVersion:Number(bank.auth_version||1)};const token=await createSession(env,ctx);
+    await addLog(env,bank.id,'Connexion administrateur');await addSecurityLog(env,bank.id,ctx,'Connexion','Connexion','autorisé','');return json({ok:true,role:'bank',bankId:bank.id,user:{name:ctx.userName,role:roleLabel(ctx.userRole)},subscription:sub.subscription,days_remaining:sub.days_remaining},200,{'set-cookie':sessionCookie(request,token)});
+   }
+   const candidates=(await env.DB.prepare('SELECT u.*,b.status AS bank_status,b.subscription,b.subscription_started_at,b.subscription_expires_at,b.created_at AS bank_created_at FROM users u JOIN banks b ON b.id=u.bank_id WHERE u.login=? AND COALESCE(u.is_deleted,0)=0 LIMIT 2').bind(login).all()).results||[];
+   if(candidates.length!==1)return failure();const user=candidates[0];const verified=await verifyPassword(password,user.pass);if(!verified.ok)return failure();
+   if(verified.needsUpgrade){const upgraded=await hashPassword(password);await env.DB.prepare('UPDATE users SET pass=? WHERE id=? AND bank_id=?').bind(upgraded,user.id,user.bank_id).run();}
+   if(String(user.status||'Actif')!=='Actif')return json({error:'Utilisateur bloqué. Contactez l’administrateur.'},403);if(user.bank_status==='Suspendu')return json({error:'Banque suspendue.'},403);
+   const bankForSub={status:user.bank_status,subscription:user.subscription,subscription_started_at:user.subscription_started_at,subscription_expires_at:user.subscription_expires_at,created_at:user.bank_created_at};const sub=subscriptionInfo(bankForSub);if(sub.expired)return json({error:'Abonnement expiré. Choisissez une formule disponible ou contactez le Super Admin.'},403);
+   await clearAccountLoginFailures(env,request,login);await env.DB.prepare("UPDATE users SET last_login=datetime('now') WHERE id=? AND bank_id=?").bind(user.id,user.bank_id).run();const ctx={role:'bank',bankId:user.bank_id,userRole:user.role||'Agent consultation / auditeur',userName:user.name||user.login,userLogin:user.login,userId:user.id,userPermissions:user.permissions,lastLogin:new Date().toISOString(),authVersion:Number(user.auth_version||1)};const token=await createSession(env,ctx);
+   await addSecurityLog(env,user.bank_id,ctx,'Connexion','Connexion','autorisé','');await addLog(env,user.bank_id,'Connexion utilisateur : '+(user.name||user.login)+' ('+roleLabel(user.role)+')');return json({ok:true,role:'bank',bankId:user.bank_id,user:{id:user.id,name:user.name||user.login,role:roleLabel(user.role),permissions:safePermissionsPayload(user.permissions,user.role)},subscription:sub.subscription,days_remaining:sub.days_remaining},200,{'set-cookie':sessionCookie(request,token)});
+  }
+
+  if(path==='/api/password-forgot'&&request.method==='POST'){
+   const p=await body(request); const login=String(p.login||'').trim();
+   if(!login)return json({error:'Identifiant obligatoire.'},400);
+   const bank=await env.DB.prepare('SELECT id,name,manager,login FROM banks WHERE login=? LIMIT 1').bind(login).first();
+   if(bank){
+    await env.DB.prepare('INSERT INTO reset_requests(id,bank_id,user_id,message,status) VALUES(?,?,?,?,?)').bind(uid('RST'),bank.id,'','Demande de réinitialisation du mot de passe Administrateur banque pour '+(bank.name||bank.login)+' — traitement réservé au Super Admin','En attente Super Admin').run();
+    await addSecurityLog(env,bank.id,{userName:bank.manager||'Administrateur banque',userRole:'Administrateur banque'},'Demande mot de passe oublié','Connexion','autorisé','Administrateur banque');
+    return json({ok:true,message:'Demande enregistrée.'});
+   }
+   const user=await env.DB.prepare('SELECT u.id,u.bank_id,u.name,u.login,u.role,b.name AS bank_name FROM users u JOIN banks b ON b.id=u.bank_id WHERE u.login=? LIMIT 1').bind(login).first();
+   if(user){
+    const rkey=canonicalRole(user.role||'');
+    const status=rkey==='admin_bank'?'En attente Super Admin':'En attente Administrateur';
+    const msg=(rkey==='admin_bank')
+      ? 'Demande de réinitialisation du mot de passe Administrateur banque pour '+(user.bank_name||user.bank_id)+' — traitement réservé au Super Admin'
+      : 'Demande de réinitialisation du mot de passe pour '+(user.name||user.login)+' ('+roleLabel(user.role)+') — traitement par l’Administrateur banque';
+    await env.DB.prepare('INSERT INTO reset_requests(id,bank_id,user_id,message,status) VALUES(?,?,?,?,?)').bind(uid('RST'),user.bank_id,user.id,msg,status).run();
+    await addSecurityLog(env,user.bank_id,{userName:user.name||user.login,userRole:user.role,userId:user.id},'Demande mot de passe oublié','Connexion','autorisé','');
+    return json({ok:true,message:'Demande enregistrée.'});
+   }
+   try{await env.DB.prepare('INSERT INTO security_logs(id,bank_id,action,section,result,agent,role,motif) VALUES(?,?,?,?,?,?,?,?)').bind(uid('SEC'),'','Demande mot de passe oublié','Connexion','refusé',login,'Inconnu','Identifiant introuvable').run();}catch(e){}
+   return json({ok:true,message:'Demande enregistrée.'});
+  }
+
+  if(path==='/api/logout'&&request.method==='POST'){const current=await getSession(request,env);if(current)await env.KV.delete('session:'+current.token);return json({ok:true},200,{'set-cookie':clearSessionCookie(request)});}
+  const s=await requireSession(request,env);
+  if(s.role==='client')return json({error:'Consultation client uniquement.'},403);
+  if((path==='/api/me'||path==='/api/load')&&request.method==='GET'){
+   if(s.role==='super'){const banks=await env.DB.prepare(bankListSelect()).all();const users=await env.DB.prepare('SELECT u.id,u.bank_id,u.name,u.login,u.role,u.status,u.last_login,u.created_at,b.name AS bank_name FROM users u LEFT JOIN banks b ON b.id=u.bank_id ORDER BY u.created_at DESC LIMIT 500').all();return json({role:'super',banks:banks.results||[],users:users.results||[]});}
+   await requireActiveBankSubscription(env,s.bankId);return json({role:'bank',...(await bankPayload(env,s.bankId,s))});
+  }
+  if(path==='/api/oukami/client-access'&&request.method==='POST'){
+   if(s.role!=='bank'||sessionRoleKey(s)!=='admin_bank')return json({error:'Réservé à l’administrateur.'},403);
+   const b=await body(request),clientId=String(b.client_id||''),password=String(b.password||'');
+   const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);
+   const found=await env.DB.prepare('SELECT id FROM clients WHERE id=? AND bank_id=? AND is_deleted=0').bind(clientId,s.bankId).first();if(!found)return json({error:'Client introuvable.'},404);
+   await env.DB.prepare('UPDATE clients SET pass=? WHERE id=? AND bank_id=?').bind(await hashPassword(password),clientId,s.bankId).run();
+   await addSecurityLog(env,s.bankId,s,'Activation accès client','Clients','autorisé','');return json({ok:true});
+  }
+  if(path==='/api/save'&&request.method==='POST'){
+   if(s.role!=='bank'||sessionRoleKey(s)!=='admin_bank')return json({error:'Enregistrement global réservé à l’Administrateur banque.'},403);
+   const payload=await body(request);if(payload.bank_id&&String(payload.bank_id)!==String(s.bankId))return json({error:'Accès inter-entreprise interdit.'},403);
+   const ms=payload.management_settings;if(!ms)return json({error:'La sauvegarde globale des données sensibles est désactivée. Utilisez les routes métier sécurisées.'},400);
+   const y=Number(ms.year||new Date().getFullYear()),m=Number(ms.month||new Date().getMonth()+1),status=String(ms.status||'open').toLowerCase();if(!y||m<1||m>12||!['open','locked','closed'].includes(status))return json({error:'Paramètres de gestion invalides.'},400);
+   await env.DB.prepare("INSERT INTO management_settings(bank_id,year,month,status,updated_at) VALUES(?,?,?,?,datetime('now')) ON CONFLICT(bank_id) DO UPDATE SET year=excluded.year,month=excluded.month,status=excluded.status,updated_at=datetime('now')").bind(s.bankId,y,m,status).run();return json({ok:true});
+  }
+  if(path.startsWith('/api/super/')||path==='/api/bank/action'){if(s.role!=='super')return json({error:'Action réservée au Super Admin.'},403);}
+  if(path==='/api/super/messages'&&request.method==='GET'&&s.role==='super'){
+   return json({items:await listSuperSupportMessages(env)});
+  }
+  if(path==='/api/super/messages/send'&&request.method==='POST'&&s.role==='super'){
+   const raw=await body(request);const parsed=safeSupportMessagePayload(raw);if(parsed.error)return json({error:parsed.error},400);
+   let bankIds=Array.isArray(raw.bank_ids)?raw.bank_ids.map(x=>String(x||'').trim()).filter(Boolean):[];
+   bankIds=Array.from(new Set(bankIds)).slice(0,SUPPORT_MESSAGE_RECIPIENT_MAX);
+   if(!bankIds.length)return json({error:'Sélectionnez au moins une entreprise destinataire.'},400);
+   const placeholders=bankIds.map(()=>'?').join(',');
+   const existing=await env.DB.prepare(`SELECT id,name FROM banks WHERE id IN (${placeholders})`).bind(...bankIds).all();
+   const valid=existing.results||[];if(valid.length!==bankIds.length)return json({error:'Une ou plusieurs entreprises destinataires sont introuvables.'},404);
+   const broadcastId=uid('BCAST');
+   const statements=valid.map(bank=>env.DB.prepare('INSERT INTO support_messages(id,broadcast_id,sender_type,sender_bank_id,recipient_bank_id,category,subject,body,created_by) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid('MSG'),broadcastId,'super','',bank.id,parsed.category,parsed.subject,parsed.body,'Super Admin'));
+   await env.DB.batch(statements);
+   for(const bank of valid){try{await addLog(env,bank.id,(parsed.category==='note'?'Note':'Message')+' reçu du Super Admin : '+parsed.subject);}catch(e){}}
+   await addSecurityLog(env,'',s,'Envoi '+(parsed.category==='note'?'note':'message'),'Messagerie Super Admin','autorisé',valid.length+' entreprise(s) destinataire(s)');
+   return json({ok:true,count:valid.length,broadcast_id:broadcastId});
+  }
+  if(path==='/api/super/messages/read'&&request.method==='POST'&&s.role==='super'){
+   const raw=await body(request);const id=String(raw.id||'');if(!id)return json({error:'Message obligatoire.'},400);
+   const row=await env.DB.prepare('SELECT id,sender_type FROM support_messages WHERE id=? AND COALESCE(deleted_by_super,0)=0').bind(id).first();if(!row)return json({error:'Message introuvable.'},404);
+   if(row.sender_type==='bank')await env.DB.prepare("UPDATE support_messages SET super_read_at=COALESCE(NULLIF(super_read_at,''),datetime('now')) WHERE id=?").bind(id).run();
+   return json({ok:true});
+  }
+  if(path==='/api/super/messages/delete'&&request.method==='POST'&&s.role==='super'){
+   const raw=await body(request);const id=String(raw.id||'');if(!id)return json({error:'Message obligatoire.'},400);
+   const row=await env.DB.prepare('SELECT id,recipient_bank_id,subject FROM support_messages WHERE id=? AND COALESCE(deleted_by_super,0)=0').bind(id).first();if(!row)return json({error:'Message introuvable.'},404);
+   await env.DB.prepare('UPDATE support_messages SET deleted_by_super=1 WHERE id=?').bind(id).run();
+   await env.DB.prepare('DELETE FROM support_messages WHERE id=? AND deleted_by_super=1 AND deleted_by_bank=1').bind(id).run();
+   await addSecurityLog(env,row.recipient_bank_id||'',s,'Suppression message','Messagerie Super Admin','autorisé',row.subject||'');
+   return json({ok:true});
+  }
+  if(path==='/api/super/user'&&request.method==='POST'&&s.role==='super'){
+   return json({error:'La création des utilisateurs est réservée à l’Administrateur banque.'},403);
+  }
+  if(path==='/api/super/user/toggle'&&request.method==='POST'&&s.role==='super'){
+   return json({error:'Le blocage/déblocage des utilisateurs de banque est réservé à l’Administrateur banque.'},403);
+  }
+  if(path==='/api/super/user/reset'&&request.method==='POST'&&s.role==='super'){
+   const u=await body(request); const row=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(u.id).first();
+   if(!row)return json({error:'Utilisateur introuvable.'},404);
+   if(canonicalRole(row.role)!=='admin_bank')return json({error:'Le Super Admin réinitialise uniquement le mot de passe Administrateur banque. Les agents sont gérés par l’Administrateur banque.'},403);
+   const password=String(u.newpass||'');const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);const passHash=await hashPassword(password);await env.DB.prepare('UPDATE users SET pass=?,auth_version=COALESCE(auth_version,1)+1 WHERE id=?').bind(passHash,u.id).run();
+   await addSecurityLog(env,row.bank_id,{role:'super',userRole:'Super Admin',userName:'Super Admin'},'Réinitialisation mot de passe Administrateur banque','Super Admin','autorisé','');
+   return json({ok:true});
+  }
+  if(path==='/api/bank/action'&&request.method==='POST'&&s.role==='super'){
+   const b=await body(request);const bank=await env.DB.prepare('SELECT id,status FROM banks WHERE id=?').bind(String(b.id||'')).first();if(!bank)return json({error:'Banque introuvable.'},404);
+   if(b.action==='toggle'){await env.DB.prepare('UPDATE banks SET status=? WHERE id=?').bind(bank.status==='Actif'?'Suspendu':'Actif',bank.id).run();}
+   else if(b.action==='activate_business'||b.action==='business'||b.action==='activate_plan'){const full=await env.DB.prepare('SELECT * FROM banks WHERE id=?').bind(bank.id).first();const current=subscriptionInfo(full);const currentCode=planCode(full.subscription||'FREE');const code=b.action==='activate_business'||b.action==='business'?'BUSINESS':planCode(b.plan);if(!current.expired&&full.status!=='Expiré'&&currentCode!=='FREE')return json({error:'Impossible de souscrire à un autre abonnement tant que l’abonnement payant actuel est actif.'},409);if(currentCode==='FREE'&&code==='FREE'&&!current.expired&&full.status!=='Expiré')return json({error:'La version Free est déjà active. Choisissez Standard, Business ou Ultimate.'},409);const meta=SUBSCRIPTION_PLANS[code];const expires=code==='ULTIMATE'?null:`+${meta.days} days`;if(code==='ULTIMATE')await env.DB.prepare("UPDATE banks SET subscription=?,subscription_started_at=datetime('now'),subscription_expires_at='',subscription_updated_at=datetime('now'),status='Actif' WHERE id=?").bind(code,bank.id).run();else await env.DB.prepare("UPDATE banks SET subscription=?,subscription_started_at=datetime('now'),subscription_expires_at=datetime('now',?),subscription_updated_at=datetime('now'),status='Actif' WHERE id=?").bind(code,expires,bank.id).run();await addLog(env,bank.id,`Version ${meta.label} activée par le Super Admin`);}
+   else if(b.action==='reset'){const password=String(b.newpass||'');const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);const passHash=await hashPassword(password);await env.DB.prepare('UPDATE banks SET pass=?,auth_version=COALESCE(auth_version,1)+1 WHERE id=?').bind(passHash,bank.id).run();await addSecurityLog(env,bank.id,s,'Réinitialisation mot de passe Administrateur banque','Super Admin','autorisé','Toutes les sessions précédentes invalidées');}
+   else if(b.action==='delete'){
+    const id=bank.id;await env.DB.batch([
+     env.DB.prepare('DELETE FROM moves WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM accounts WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM clients WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM users WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM logs WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM security_logs WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM charge_bases WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM obligations WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM reset_requests WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM account_types WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM movement_types WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM manual_revenues WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM ignored_revenues WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM management_settings WHERE bank_id=?').bind(id),env.DB.prepare('DELETE FROM support_messages WHERE recipient_bank_id=? OR sender_bank_id=?').bind(id,id),env.DB.prepare('DELETE FROM banks WHERE id=?').bind(id)
+    ]);
+   }else return json({error:'Action inconnue.'},400);
+   return json({ok:true});
+  }
+  if(s.role!=='bank')return json({error:'Action réservée à une banque.'},403); const bankId=s.bankId; await requireActiveBankSubscription(env,bankId);
+  const roleDenied=await enforceRoleApiAccess(env,bankId,s,path,request); if(roleDenied)return roleDenied;
+
+  // Sauvegarde/restauration isolée par entreprise, sans secrets ni comptes d'autres banques.
+  if(path==='/api/settings/backup' || path==='/api/settings/restore'){
+   if(sessionRoleKey(s)!=='admin_bank')return json({error:'Réservé à l’administrateur de l’entreprise.'},403);
+   const tables=['clients','accounts','moves','users','logs','security_logs','charge_bases','obligations','reset_requests','account_types','movement_types','manual_revenues','ignored_revenues','management_settings','operation_requests'];
+   if(path.endsWith('/backup')&&request.method==='GET'){
+    const contents={};for(const table of tables){const r=await env.DB.prepare('SELECT * FROM '+table+' WHERE bank_id=?').bind(bankId).all();contents[table]=(r.results||[]).map(row=>{const x={...row};if(table==='users')delete x.pass;return x;});}
+    const bank=await env.DB.prepare('SELECT * FROM banks WHERE id=?').bind(bankId).first();const profile={...bank};delete profile.pass;delete profile.auth_version;delete profile.login;delete profile.subscription;delete profile.subscription_started_at;delete profile.subscription_expires_at;delete profile.subscription_updated_at;delete profile.status;
+    await addLog(env,bankId,'Sauvegarde des données exportée');return json({format:'GLOBAL_BANK_BACKUP',version:1,exported_at:new Date().toISOString(),company:{id:bankId,name:bank.name},profile,tables:contents});
+   }
+   if(path.endsWith('/restore')&&request.method==='POST'){
+    const payload=await body(request);if(payload.format!=='GLOBAL_BANK_BACKUP'||payload.version!==1||!payload.tables||!payload.company)return json({error:'Format de sauvegarde invalide.'},400);
+    if(payload.target_company_id!==bankId)return json({error:'Entreprise de destination non autorisée.'},403);
+    if(payload.confirmation!=='RESTAURER')return json({error:'Confirmation RESTAURER obligatoire.'},400);
+    const source=String(payload.company.id||'');if(!source)return json({error:'Identifiant entreprise source manquant.'},400);
+    const statements=[];let total=0;
+    // Restaurer les données métier; ne jamais importer les mots de passe, sessions, rôles ou journaux d'audit.
+    const allowed=['clients','accounts','moves','charge_bases','obligations','account_types','movement_types','manual_revenues','ignored_revenues','management_settings'];
+    for(const table of allowed){const rows=payload.tables[table];if(!Array.isArray(rows)||rows.length>50000)return json({error:'Table invalide : '+table},400);total+=rows.length;if(total>80000)return json({error:'Sauvegarde trop volumineuse.'},413);
+     const columns=(await env.DB.prepare('PRAGMA table_info('+table+')').all()).results.map(x=>x.name);
+     for(const row of rows){if(!row||typeof row!=='object'||Array.isArray(row)||String(row.bank_id)!==source)return json({error:'Ligne invalide dans '+table},400);const keys=Object.keys(row);if(keys.some(k=>!columns.includes(k)))return json({error:'Colonnes incompatibles : '+table},400);}
+    }
+    // Import réservé à une entreprise vide : aucun écrasement ni mélange de comptabilités.
+    for(const table of allowed){const n=await env.DB.prepare('SELECT COUNT(*) AS n FROM '+table+' WHERE bank_id=?').bind(bankId).first();if(Number(n.n)>0)return json({error:'Import refusé : entreprise non vide ('+table+'). Créez une entreprise vierge pour restaurer.'},409);}
+    for(const table of allowed){for(const row of payload.tables[table]){const r={...row,bank_id:bankId};const keys=Object.keys(r);statements.push(env.DB.prepare('INSERT INTO '+table+' ('+keys.join(',')+') VALUES ('+keys.map(()=>'?').join(',')+')').bind(...keys.map(k=>r[k]===undefined?null:r[k])));}}
+    // D1 batch est atomique; aucune modification si une contrainte échoue.
+    if(statements.length)await env.DB.batch(statements);
+    await addLog(env,bankId,'Restauration de sauvegarde depuis '+String(payload.company.name||source).slice(0,100));return json({ok:true,rows:total});
+   }
+   return json({error:'Méthode interdite.'},405);
+  }
+  if(path==='/api/messages'&&request.method==='GET'){
+   if(sessionRoleKey(s)!=='admin_bank')return json({error:'Messagerie réservée à l’Administrateur banque.'},403);
+   return json({items:await listBankSupportMessages(env,bankId)});
+  }
+  if(path==='/api/messages/send'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return json({error:'Messagerie réservée à l’Administrateur banque.'},403);
+   const raw=await body(request);const parsed=safeSupportMessagePayload(raw);if(parsed.error)return json({error:parsed.error},400);
+   const bank=await env.DB.prepare('SELECT name,manager FROM banks WHERE id=?').bind(bankId).first();if(!bank)return json({error:'Entreprise introuvable.'},404);
+   await env.DB.prepare('INSERT INTO support_messages(id,broadcast_id,sender_type,sender_bank_id,recipient_bank_id,category,subject,body,created_by) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid('MSG'),uid('THREAD'),'bank',bankId,bankId,parsed.category,parsed.subject,parsed.body,String(s.userName||bank.manager||'Administrateur banque')).run();
+   await addLog(env,bankId,(parsed.category==='note'?'Note':'Message')+' envoyé au Super Admin : '+parsed.subject);
+   await addSecurityLog(env,bankId,s,'Envoi '+(parsed.category==='note'?'note':'message'),'Support','autorisé',parsed.subject);
+   return json({ok:true});
+  }
+  if(path==='/api/messages/read'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return json({error:'Messagerie réservée à l’Administrateur banque.'},403);
+   const raw=await body(request);const id=String(raw.id||'');if(!id)return json({error:'Message obligatoire.'},400);
+   const row=await env.DB.prepare('SELECT id,sender_type FROM support_messages WHERE id=? AND recipient_bank_id=? AND COALESCE(deleted_by_bank,0)=0').bind(id,bankId).first();if(!row)return json({error:'Message introuvable.'},404);
+   if(row.sender_type==='super')await env.DB.prepare("UPDATE support_messages SET bank_read_at=COALESCE(NULLIF(bank_read_at,''),datetime('now')) WHERE id=? AND recipient_bank_id=?").bind(id,bankId).run();
+   return json({ok:true});
+  }
+  if(path==='/api/messages/delete'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return json({error:'Messagerie réservée à l’Administrateur banque.'},403);
+   const raw=await body(request);const id=String(raw.id||'');if(!id)return json({error:'Message obligatoire.'},400);
+   const row=await env.DB.prepare('SELECT id,subject FROM support_messages WHERE id=? AND recipient_bank_id=? AND COALESCE(deleted_by_bank,0)=0').bind(id,bankId).first();if(!row)return json({error:'Message introuvable.'},404);
+   await env.DB.prepare('UPDATE support_messages SET deleted_by_bank=1 WHERE id=? AND recipient_bank_id=?').bind(id,bankId).run();
+   await env.DB.prepare('DELETE FROM support_messages WHERE id=? AND deleted_by_super=1 AND deleted_by_bank=1').bind(id).run();
+   await addSecurityLog(env,bankId,s,'Suppression message','Boîte de réception et d’envois','autorisé',row.subject||'');
+   return json({ok:true});
+  }
+  if(path==='/api/correction-requests'&&request.method==='GET'){
+   const all=(await env.DB.prepare('SELECT r.*,m.type AS movement_type,m.amount AS movement_amount,m.account_id FROM operation_requests r LEFT JOIN moves m ON m.id=r.movement_id AND m.bank_id=r.bank_id WHERE r.bank_id=? ORDER BY r.created_at DESC LIMIT 300').bind(bankId).all()).results||[];
+   return json({items:sessionRoleKey(s)==='admin_bank'?all:all.filter(x=>String(x.requested_by)===String(s.userId||''))});
+  }
+  if(path==='/api/correction-requests'&&request.method==='POST'){
+   const r=await body(request);const movementId=String(r.movement_id||'').trim();const requestType=norm(r.request_type||'correction');const reason=String(r.reason||'').trim();
+   if(!movementId||!['correction','annulation','verification','vérification','reimpression exceptionnelle','réimpression exceptionnelle'].includes(requestType)||reason.length<5)return json({error:'Mouvement, type et motif détaillé obligatoires.'},400);
+   const movement=await env.DB.prepare('SELECT id FROM moves WHERE id=? AND bank_id=? AND COALESCE(is_voided,0)=0').bind(movementId,bankId).first();if(!movement)return json({error:'Mouvement introuvable dans votre banque.'},404);
+   await env.DB.prepare('INSERT INTO operation_requests(id,bank_id,movement_id,requested_by,requested_by_name,requested_by_role,request_type,reason,status) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid('REQ'),bankId,movementId,String(s.userId||'BANK_ADMIN'),String(s.userName||''),roleLabel(s.userRole||''),requestType,reason,'pending').run();
+   await addSecurityLog(env,bankId,s,'Demande de correction','Mouvements','autorisé',reason,{permission:'correction.request',route:path,resource:movementId});return json({ok:true});
+  }
+  if(path==='/api/correction-requests/review'&&request.method==='POST'){
+   const r=await body(request);const id=String(r.id||'');const status=norm(r.status||'');if(!id||!['approved','rejected','executed','approuvee','approuvée','refusee','refusée','executee','exécutée'].includes(status))return json({error:'Décision invalide.'},400);
+   const row=await env.DB.prepare('SELECT * FROM operation_requests WHERE id=? AND bank_id=?').bind(id,bankId).first();if(!row)return json({error:'Demande introuvable.'},404);
+   const canonical=status.startsWith('appro')?'approved':status.startsWith('ref')?'rejected':status.startsWith('exec')?'executed':status;
+   await env.DB.prepare("UPDATE operation_requests SET status=?,reviewed_by=?,reviewed_at=datetime('now'),review_note=? WHERE id=? AND bank_id=?").bind(canonical,String(s.userName||'Administrateur banque'),String(r.review_note||''),id,bankId).run();
+   await addSecurityLog(env,bankId,s,'Traitement demande de correction','Mouvements','autorisé',canonical,{permission:'correction.review',route:path,resource:row.movement_id});return json({ok:true});
+  }
+  if(path==='/api/client/media'&&request.method==='GET'){
+   const clientId=String(new URL(request.url).searchParams.get('id')||'').trim();if(!clientId)return new Response('Image introuvable.',{status:404});
+   const row=await env.DB.prepare('SELECT id,photo_logo FROM clients WHERE id=? AND bank_id=? AND COALESCE(is_deleted,0)=0').bind(clientId,bankId).first();
+   if(!row)return new Response('Image introuvable.',{status:404,headers:{'cache-control':'no-store'}});
+   let stored=String(row.photo_logo||'');if(isClientMediaRef(stored))stored=String(await env.KV.get(stored.slice(3))||'');
+   return clientImageResponse(stored);
+  }
+
+  if(path==='/api/admin/verify-password'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return json({error:'Action réservée à l’Administrateur banque.'},403);
+   const p=await body(request);const password=String(p.password||'');const row=await env.DB.prepare('SELECT pass FROM banks WHERE id=?').bind(bankId).first();const verified=row?await verifyPassword(password,row.pass):{ok:false};
+   if(verified.ok){if(verified.needsUpgrade){const upgraded=await hashPassword(password);await env.DB.prepare('UPDATE banks SET pass=? WHERE id=?').bind(upgraded,bankId).run();}if(p.action)try{await env.DB.prepare('INSERT INTO security_logs(id,bank_id,action,section,result,agent,role,motif,user_id) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid('SEC'),bankId,String(p.action||''),String(p.section||''),String(p.result||'autorisé'),String(p.agent||s.userName||'Administrateur'),roleLabel(s.userRole||'Administrateur banque'),String(p.motif||''),String(s.userId||'')).run();}catch(e){}return json({ok:true});}
+   return json({error:'Mot de passe administrateur incorrect.'},403);
+  }
+
+  if(path==='/api/security/log'&&request.method==='POST'){
+   const g=await body(request);
+   await env.DB.prepare('INSERT INTO security_logs(id,bank_id,action,section,result,agent,role,motif,user_id) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid('SEC'),bankId,String(g.action||''),String(g.section||''),String(g.result||''),String(s.userName||'Utilisateur'),roleLabel(s.userRole||'Administrateur banque'),String(g.motif||''),String(s.userId||'')).run();
+   await addLog(env,bankId,'Sécurité : '+String(g.action||'action')+' — '+String(g.result||'journalisée'));
+   return json({ok:true});
+  }
+
+  if(path==='/api/management/settings'&&request.method==='POST'){
+   const g=await body(request); const y=Number(g.year||new Date().getFullYear()), m=Number(g.month||1); const current=await managementSettings(env,bankId); const status=String(g.status||current.status||'open').toLowerCase();
+   if(!y||m<1||m>12)return json({error:'Année ou mois invalide.'},400);
+   await env.DB.prepare("INSERT INTO management_settings(bank_id,year,month,status,updated_at) VALUES(?,?,?,?,datetime('now')) ON CONFLICT(bank_id) DO UPDATE SET year=excluded.year,month=excluded.month,status=excluded.status,updated_at=datetime('now')").bind(bankId,y,m,['open','locked','closed'].includes(status)?status:'open').run();
+   await addLog(env,bankId,'Gestion appliquée : '+m+'/'+y+' - '+status); return json({ok:true});
+  }
+  if(path==='/api/management/status'&&request.method==='POST'){
+   const g=await body(request); const current=await managementSettings(env,bankId); const status=String(g.status||'open').toLowerCase(); if(!['open','locked','closed'].includes(status))return json({error:'État invalide.'},400);
+   await env.DB.prepare("INSERT INTO management_settings(bank_id,year,month,status,updated_at) VALUES(?,?,?,?,datetime('now')) ON CONFLICT(bank_id) DO UPDATE SET status=excluded.status,updated_at=datetime('now')").bind(bankId,Number(current.year||new Date().getFullYear()),Number(current.month||new Date().getMonth()+1),status).run();
+   await addLog(env,bankId,'État de l’exercice : '+status); return json({ok:true});
+  }
+
+
+  if(path==='/api/bank/update'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return json({error:'Action réservée à l’Administrateur banque.'},403);
+   const b=await body(request);const current=await env.DB.prepare('SELECT * FROM banks WHERE id=?').bind(bankId).first();if(!current)return json({error:'Banque introuvable.'},404);
+   const name=String(b.name||'').trim(),manager=String(b.manager||'').trim(),contact=String(b.contact||'').trim(),address=String(b.address||'').trim(),login=String(b.login||current.login||'').trim(),logo=String(b.logo||'');
+   if(!name)return json({error:'Nom de banque obligatoire.'},400);if(!manager)return json({error:'Responsable obligatoire.'},400);if(!contact)return json({error:'Contact obligatoire.'},400);if(!address)return json({error:'Adresse obligatoire.'},400);if(!login)return json({error:'Identifiant obligatoire.'},400);
+   const passwordChanged=String(b.pass||'')!=='';const sensitive=String(current.name||'').trim()!==name||String(current.manager||'').trim()!==manager||String(current.login||'').trim()!==login||passwordChanged||String(current.logo||'')!==logo||String(current.stamp||'')!==String(b.stamp||'')||String(current.signature||'')!==String(b.signature||'');
+   if(sensitive){const adminPassword=String(b.admin_password||'');const verified=await verifyPassword(adminPassword,current.pass);if(!verified.ok){await addSecurityLog(env,bankId,s,'changement profil banque','Profil banque','refusé','Mot de passe administrateur incorrect ou absent');return json({error:'Mot de passe incorrect. Action refusée.'},403);}}
+   if(loginReserved(env,login)||await loginExists(env,login,{bankId}))return json({error:'Identifiant déjà utilisé.'},409);
+   let passHash=current.pass;if(passwordChanged){const weak=assertPasswordStrength(String(b.pass));if(weak)return json({error:weak},400);passHash=await hashPassword(String(b.pass));}
+   const nextVersion=Number(current.auth_version||1)+(passwordChanged?1:0);
+   await env.DB.prepare('UPDATE banks SET name=?,manager=?,contact=?,address=?,email=?,slogan=?,logo=?,stamp=?,signature=?,primary_color=?,secondary_color=?,footer_text=?,legal_mentions=?,currency=?,country=?,city=?,login=?,pass=?,auth_version=? WHERE id=?')
+    .bind(name,manager,contact,address,String(b.email||''),String(b.slogan||''),logo,String(b.stamp||''),String(b.signature||''),String(b.primary_color||'#003b3b'),String(b.secondary_color||'#e7ad2f'),String(b.footer_text||'Document généré automatiquement'),String(b.legal_mentions||''),String(b.currency||'FCFA'),String(b.country||''),String(b.city||''),login,passHash,nextVersion,bankId).run();
+   await addSecurityLog(env,bankId,s,'changement profil banque','Profil banque','autorisé',passwordChanged?'Mot de passe modifié et anciennes sessions invalidées':(sensitive?'Modification sensible validée':'Modification simple'));await addLog(env,bankId,'Profil banque modifié');await ensureCompanyAccount(env,bankId);
+   if(passwordChanged){await env.KV.delete('session:'+s.token);const token=await createSession(env,{...s,token:undefined,userName:manager,userLogin:login,authVersion:nextVersion});return json({ok:true,session_renewed:true},200,{'set-cookie':sessionCookie(request,token)});}
+   return json({ok:true});
+  }
+
+
+  if(path==='/api/settings/cga'&&request.method==='POST'){
+   const g=await body(request);
+   const html=String(g.cga_conditions||'');
+   await env.DB.prepare('UPDATE banks SET cga_conditions=? WHERE id=?').bind(html,bankId).run();
+   await addLog(env,bankId,'Fiche condition générale d’adhésion modifiée');
+   await addSecurityLog(env,bankId,s,'modification fiche CGA','Paramètres','autorisé','Conditions générales d’adhésion enregistrées');
+   return json({ok:true});
+  }
+
+  if(path==='/api/client'&&request.method==='POST'){
+   if(Number(request.headers.get('content-length')||0)>CLIENT_REQUEST_MAX_BYTES)return json({error:'Le formulaire client est trop volumineux.'},413);
+   const c=await body(request),clean=normalizeClientPayload(c,'');
+   const clientId=uid('CL'),mediaRef=clean.media?await storeClientMedia(env,bankId,clientId,clean.media):'';
+   await env.DB.prepare('INSERT INTO clients(id,bank_id,name,contact,job,address,piece,pass,client_type,client_details,photo_logo,is_blocked,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,0,0)').bind(clientId,bankId,clean.name,clean.contact,clean.job,clean.address,clean.piece,'',clean.type,clean.details,mediaRef).run();
+   await addLog(env,bankId,'Nouveau client ajouté : '+clean.name+' ('+(clean.type==='personne_morale'?'Personne morale':'Personne physique')+')');
+   await addSecurityLog(env,bankId,s,'Création client','Clients','autorisé',clean.type);
+   return json({ok:true});
+  }
+  if(path==='/api/client/update'&&request.method==='POST'){
+   const limitedClientUpdate=sessionRoleKey(s)!=='admin_bank'&&hasPermission(s,'clients.update.basic');
+   if(Number(request.headers.get('content-length')||0)>CLIENT_REQUEST_MAX_BYTES)return json({error:'Le formulaire client est trop volumineux.'},413);
+   const c=await body(request);if(limitedClientUpdate){delete c.photo_logo;delete c.client_type;const raw=parseClientDetails(c.client_details);const allowed={typeClient:raw.typeClient||'personne_physique',nom:raw.nom||c.name||'',prenoms:raw.prenoms||'',dateNaissance:raw.dateNaissance||'',sexe:raw.sexe||'',telephone:raw.telephone||c.contact||'',commune:raw.commune||'',villageQuartier:raw.villageQuartier||'',numeroPiece:raw.numeroPiece||c.piece||'',profession:raw.profession||c.job||'',observation:raw.observation||''};c.client_details=JSON.stringify(allowed);}if(!c.id)return json({error:'Client obligatoire.'},400);
+   const existing=await env.DB.prepare('SELECT id,photo_logo FROM clients WHERE id=? AND bank_id=? AND COALESCE(is_deleted,0)=0').bind(c.id,bankId).first();
+   if(!existing)return json({error:'Client introuvable.'},404);
+   const clean=normalizeClientPayload(c,'');
+   let mediaRef=String(existing.photo_logo||'');
+   if(clean.media){mediaRef=await storeClientMedia(env,bankId,c.id,clean.media);}
+   else if(mediaRef&&/^data:image\/(?:jpeg|png|webp);base64,/i.test(mediaRef)){mediaRef=await storeClientMedia(env,bankId,c.id,mediaRef);}
+   await env.DB.prepare('UPDATE clients SET name=?,contact=?,job=?,address=?,piece=?,client_type=?,client_details=?,photo_logo=? WHERE id=? AND bank_id=?').bind(clean.name,clean.contact,clean.job,clean.address,clean.piece,clean.type,clean.details,mediaRef,c.id,bankId).run();
+   await addLog(env,bankId,'Client modifié : '+clean.name);
+   await addSecurityLog(env,bankId,s,'Modification client','Clients','autorisé',clean.type);
+   return json({ok:true});
+  }
+  if(path==='/api/client/block'&&request.method==='POST'){const c=await body(request); if(!c.id)return json({error:'Client obligatoire.'},400); const b=Number(c.is_blocked||0)?1:0; await env.DB.prepare('UPDATE clients SET is_blocked=? WHERE id=? AND bank_id=?').bind(b,c.id,bankId).run(); await addLog(env,bankId,b?'Client bloqué':'Client débloqué'); return json({ok:true});}
+  if(path==='/api/client/delete'&&request.method==='POST'){
+   const c=await body(request);if(!c.id)return json({error:'Client obligatoire.'},400);const row=await env.DB.prepare('SELECT * FROM clients WHERE id=? AND bank_id=?').bind(c.id,bankId).first();if(!row)return json({error:'Client introuvable.'},404);if(isCompanyClientRow(row,bankId))return json({error:'Le client entreprise de la banque est protégé.'},403);
+   await env.DB.prepare("UPDATE clients SET is_deleted=1 WHERE id=? AND bank_id=?").bind(c.id,bankId).run();await env.DB.prepare("UPDATE accounts SET is_deleted=1,status='Archivé' WHERE client_id=? AND bank_id=?").bind(c.id,bankId).run();await addSecurityLog(env,bankId,s,'Suppression logique client','Clients','autorisé','Historique financier conservé',{permission:'clients.delete',route:path,resource:c.id});return json({ok:true,logical_delete:true});
+  }
+  if(path==='/api/client/restore'&&request.method==='POST'){
+   const c=await body(request);if(!c.id)return json({error:'Client obligatoire.'},400);const row=await env.DB.prepare('SELECT id FROM clients WHERE id=? AND bank_id=? AND COALESCE(is_deleted,0)=1').bind(c.id,bankId).first();if(!row)return json({error:'Client archivé introuvable.'},404);await env.DB.prepare('UPDATE clients SET is_deleted=0 WHERE id=? AND bank_id=?').bind(c.id,bankId).run();await env.DB.prepare("UPDATE accounts SET is_deleted=0,status=CASE WHEN status='Archivé' THEN 'Actif' ELSE status END WHERE client_id=? AND bank_id=?").bind(c.id,bankId).run();await addSecurityLog(env,bankId,s,'Restauration client','Clients','autorisé','',{permission:'clients.restore',route:path,resource:c.id});return json({ok:true});
+  }
+  if(path==='/api/account'&&request.method==='POST'){await rejectIfExerciseClosed(env,bankId);
+   const a=await body(request);
+   if(!a.clientId)return json({error:'Client obligatoire.'},400);
+   const owner=await env.DB.prepare('SELECT id FROM clients WHERE id=? AND bank_id=? AND COALESCE(is_deleted,0)=0 LIMIT 1').bind(a.clientId,bankId).first();
+   if(!owner)return json({error:'Client introuvable pour cette entreprise.'},404);
+   const id=uid('ACC'),number=`BM-${new Date().getFullYear()}-${Math.floor(100000+Math.random()*899999)}`,type=a.type||'Compte courant';
+   let dep=Number(a.deposit||0),fee=Number(a.fee||0),balance=dep-fee;
+   let normalOpenFee=Number(a.openFee||0), normalCarnetFee=Number(a.carnetFee||0), normalBonus=Number(a.bonus||0), normalOpenDate=String(a.openDate||new Date().toISOString().slice(0,10));
+   let creditAmount=0,creditRate=0,creditDuration=0,creditMonthly=0,creditDueCount=0,creditPenalty=0,creditTotal=0,creditChoice='',creditCarnetFee=0;
+   const tnorm=norm(type);
+   const isCredit=tnorm.includes('credit');
+   const isTerm=tnorm==='depot a terme';
+   if(!isCredit && !isTerm){
+    fee=Number(a.fee||0);
+    const bonusAmount=dep*normalBonus/100;
+    balance=dep+bonusAmount-fee;
+    creditRate=normalBonus;
+    creditChoice=`Date ouverture: ${normalOpenDate||'—'} | Frais ouverture: ${normalOpenFee} | Frais carnet: ${normalCarnetFee} | Bonus: ${normalBonus}%`;
+   }
+   if(isCredit){
+    creditChoice=String(a.creditChoice||'');
+    if(a.creditStartDate||a.creditEndDate) creditChoice += ` | Date début: ${a.creditStartDate||'—'} | Date fin: ${a.creditEndDate||'—'}`;
+    creditAmount=Number(a.creditAmount||0); creditRate=Number(a.creditRate||0); creditDuration=Number(a.creditDuration||0); creditPenalty=Number(a.creditPenalty||0); fee=Number(a.fee||0); creditCarnetFee=Number(a.creditCarnetFee||a.credit_carnet_fee||0)||0;
+    if(creditCarnetFee>0 && !String(creditChoice).includes('Frais carnet')) creditChoice += ` | Frais carnet: ${creditCarnetFee}`;
+    if(creditAmount<=0)return json({error:'Montant du crédit obligatoire.'},400);
+    const sourceApprovisionnementId=String(a.creditSourceApprovisionnementId||a.credit_source_approvisionnement_id||a.creditSourceDecaissementId||a.credit_source_decaissement_id||'').trim();
+    if(!sourceApprovisionnementId)return json({error:'Source du montant obligatoire : choisissez un N° d’enregistrement d’approvisionnement disponible.'},400);
+    const sourceInfo=await availableCreditSourceApprovisionnement(env,bankId,sourceApprovisionnementId);
+    if(!sourceInfo.ok)return json({error:sourceInfo.error||'Source du montant invalide.'},400);
+    if(sourceInfo.available<=0)return json({error:'Cet approvisionnement n’a plus de montant disponible.'},400);
+    if(creditAmount>sourceInfo.available)return json({error:'Montant du crédit supérieur au montant disponible de l’approvisionnement choisi.'},400);
+    const sourceRef=String(a.creditSourceApprovisionnementRegister||a.creditSourceDecaissementRegister||sourceApprovisionnementId).replace(/[^A-Za-z0-9 _|.:/-]/g,'').slice(0,80);
+    creditChoice += ` | Source du montant: approvisionnement ${sourceRef} ${sourceInfo.marker} | Montant disponible avant crédit: ${sourceInfo.available} | Reste approvisionnement: ${Math.max(0,Math.round((sourceInfo.available-creditAmount)*100)/100)}`;
+    if(creditDuration<=0)return json({error:'Durée du crédit obligatoire.'},400);
+    creditTotal=Number(a.creditTotal||0)||(creditAmount+(creditAmount*creditRate/100)+fee);
+    creditMonthly=Number(a.creditMonthly||0)||(creditTotal/creditDuration); creditDueCount=Number(a.creditDueCount||0)||creditDuration; balance=creditTotal;
+   }else if(isTerm){
+    creditChoice=`Date début: ${a.termStartDate||'—'} | Date fin: ${a.termEndDate||'—'}`;
+    creditAmount=Number(a.termAmount||0); creditRate=Number(a.termRate||0); creditDuration=Number(a.termDuration||0); fee=Number(a.fee||0);
+    if(creditAmount<=0)return json({error:'Montant du dépôt obligatoire.'},400);
+    if(creditDuration<=0)return json({error:'Durée du dépôt à terme obligatoire.'},400);
+    creditTotal=Number(a.termTotal||0)||(creditAmount+(creditAmount*creditRate/100));
+    creditMonthly=0; creditDueCount=creditDuration; balance=creditTotal;
+   }
+   await env.DB.prepare('INSERT INTO accounts(id,bank_id,client_id,number,type,balance,status,credit_fee,credit_carnet_fee,credit_amount,credit_rate,credit_duration,credit_monthly,credit_due_count,credit_penalty_rate,credit_total,credit_choice) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').bind(id,bankId,a.clientId,number,type,balance,'Actif',fee,creditCarnetFee,creditAmount,creditRate,creditDuration,creditMonthly,creditDueCount,creditPenalty,creditTotal,creditChoice).run();
+   if(isCredit){
+    await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Crédit accordé','Montant crédit accordé - solde total à régler enregistré',creditAmount,balance).run();
+    const carnet=Number(creditCarnetFee||0);
+    const dossier=Math.max(0,fee-carnet);
+    const creditInterest=Math.max(0,Math.round((Number(creditTotal||0)-Number(creditAmount||0)-Number(fee||0))*100)/100);
+    if(dossier>0) await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Frais de dossiers crédit','Frais de dossier liés à l’ouverture du compte crédit',dossier,balance).run();
+    if(carnet>0) await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Frais Carnet','Frais de carnet liés à l’ouverture du compte crédit',carnet,balance).run();
+    if(creditInterest>0) await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Intérêts sur crédits','Intérêts cumulés du crédit comptabilisés comme revenu banque',creditInterest,balance).run();
+    // Règle officielle : le Compte entreprise automatique n'est plus alimenté
+    // par le crédit accordé. Il sera alimenté au fur et à mesure des paiements
+    // crédits remboursés, limités au capital accordé.
+    await ensureCompanyAccount(env,bankId);
+   }else if(isTerm){
+    await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Dépôt à terme','Montant du dépôt à terme - solde total à régler au client',creditAmount,balance).run();
+    if(fee>0) await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Frais Dépôt à terme','Frais de dossier dépôt à terme versés à la banque',fee,balance).run();
+   }else{
+    if(dep>0)await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Dépôt','Premier dépôt - '+type,dep,balance).run();
+    if(normalBonus>0)await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Bonus client','Bonus à verser au client - '+type,dep*normalBonus/100,balance).run();
+    if(normalOpenFee>0)await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Frais d’ouverture','Frais d’ouverture versés à la banque - '+type,normalOpenFee,balance).run();
+    if(normalCarnetFee>0)await env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after) VALUES(?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,id,'Frais Carnet','Frais de carnet versés à la banque - '+type,normalCarnetFee,balance).run();
+   }
+   await addLog(env,bankId,'Nouveau compte créé : '+number); return json({ok:true});
+  }
+
+  if(path==='/api/account/delete'&&request.method==='POST'){await rejectIfExerciseClosed(env,bankId);
+   const a=await body(request);if(!a.id)return json({error:'Compte obligatoire.'},400);const acc=await env.DB.prepare('SELECT * FROM accounts WHERE id=? AND bank_id=?').bind(a.id,bankId).first();if(!acc)return json({error:'Compte introuvable.'},404);if(isCompanyAccountRow(acc,bankId))return json({error:'Le compte entreprise automatique est protégé.'},403);await env.DB.prepare("UPDATE accounts SET is_deleted=1,status='Archivé' WHERE id=? AND bank_id=?").bind(a.id,bankId).run();await addSecurityLog(env,bankId,s,'Suppression logique compte','Comptes','autorisé','Mouvements conservés',{permission:'accounts.delete',route:path,resource:a.id});return json({ok:true,logical_delete:true});
+  }
+  if(path==='/api/account/restore'&&request.method==='POST'){
+   const a=await body(request);if(!a.id)return json({error:'Compte obligatoire.'},400);const acc=await env.DB.prepare('SELECT id FROM accounts WHERE id=? AND bank_id=? AND COALESCE(is_deleted,0)=1').bind(a.id,bankId).first();if(!acc)return json({error:'Compte archivé introuvable.'},404);await env.DB.prepare("UPDATE accounts SET is_deleted=0,status=CASE WHEN status='Archivé' THEN 'Actif' ELSE status END WHERE id=? AND bank_id=?").bind(a.id,bankId).run();await addSecurityLog(env,bankId,s,'Restauration compte','Comptes','autorisé','',{permission:'accounts.restore',route:path,resource:a.id});return json({ok:true});
+  }
+  if(path==='/api/account/block'&&request.method==='POST'){await rejectIfExerciseClosed(env,bankId);
+   const a=await body(request); if(!a.id)return json({error:'Compte obligatoire.'},400);
+   const acc=await env.DB.prepare('SELECT * FROM accounts WHERE id=? AND bank_id=?').bind(a.id,bankId).first();
+   if(!acc)return json({error:'Compte introuvable.'},404);
+   if(isCompanyAccountRow(acc,bankId))return json({error:'Le compte entreprise de la banque est protégé : blocage impossible.'},403);
+   if(String(acc.status||'Actif')==='Supprimé')return json({error:'Compte supprimé : action impossible.'},403);
+   const b=Number(a.is_blocked||0)?1:0;
+   const reason=String(a.reason||'').trim();
+   if(b && !reason)return json({error:'Raison du blocage obligatoire.'},400);
+   if(b) await env.DB.prepare('UPDATE accounts SET is_blocked=1, block_reason=? WHERE id=? AND bank_id=?').bind(reason,a.id,bankId).run();
+   else await env.DB.prepare('UPDATE accounts SET is_blocked=0 WHERE id=? AND bank_id=?').bind(a.id,bankId).run();
+   await addLog(env,bankId,b?'Compte bloqué : '+(acc.number||a.id):'Compte débloqué : '+(acc.number||a.id));
+   return json({ok:true});
+  }
+  if(path==='/api/move'&&request.method==='POST'){
+   await rejectIfExerciseClosed(env,bankId);
+   const m=await body(request);
+   let amount=Number(m.amount||0);
+   let operationFee=Number(m.operationFee||m.operation_fee||0)||0;
+   if(operationFee<0)return json({error:'Frais d’opération invalide.'},400);
+   if(!m.accountId)return json({error:'Compte obligatoire.'},400);
+   const acc=await env.DB.prepare('SELECT * FROM accounts WHERE id=? AND bank_id=?').bind(m.accountId,bankId).first();
+   if(!acc)return json({error:'Compte introuvable.'},404);
+   if(String(acc.status||'Actif')==='Supprimé')return json({error:'Compte supprimé : mouvement impossible.'},403);
+   if(Number(acc.is_blocked||0)){const reason=String(acc.block_reason||'').trim();return json({error:'Compte bloqué par l’administrateur : mouvement impossible.'+(reason?' Raison : '+reason:'')},403);}
+   const cli=await env.DB.prepare('SELECT is_blocked FROM clients WHERE id=? AND bank_id=?').bind(acc.client_id,bankId).first();
+   if(cli&&Number(cli.is_blocked||0))return json({error:'Client bloqué : mouvement impossible.'},403);
+   const type=m.type||'Dépôt';
+   const tnorm=norm(type);
+   const actorRole=sessionRoleKey(s);
+   // Les agents ne peuvent jamais élargir leur liste en envoyant un libellé forgé.
+   if(actorRole==='agent_caisse'&&!movementTypeInList(type,CASHIER_MOVEMENT_TYPES))return json({error:'Type de mouvement non autorisé pour l’Agent caisse.'},403);
+   if(actorRole==='agent_credit'&&!movementTypeInList(type,CREDIT_AGENT_MOVEMENT_TYPES))return json({error:'Type de mouvement non autorisé pour l’Agent crédit.'},403);
+   // Les frais sont des types de mouvement à part entière : aucun frais libre parallèle.
+   if(actorRole==='agent_caisse'||actorRole==='agent_credit')operationFee=0;
+   const isCompanyAccount=isCompanyAccountRow(acc,bankId);
+   if(isCompanyAccount){
+    if(actorRole==='agent_credit'){
+     if(!isCompanyApprovisionnementType(type))return json({error:'L’Agent crédit peut uniquement enregistrer un Approvisionnement sur le Compte entreprise automatique.'},403);
+    }else if(!['super_admin','admin_bank'].includes(actorRole))return json({error:'La gestion du Compte entreprise automatique est réservée à l’Administrateur, sauf Approvisionnement autorisé à l’Agent crédit.'},403);
+    if(!isCompanyMovementType(type))return json({error:'Ce compte entreprise accepte uniquement les mouvements Approvisionnement et Décaissement.'},403);
+    // Compte entreprise automatique :
+    // - Approvisionnement augmente le solde du compte entreprise et sera repris comme revenu banque dans les rapports.
+    // - Décaissement diminue le solde du compte entreprise. Côté interface, il est repris
+    //   dans le rapport des revenus comme une ligne négative afin de diminuer le total.
+    // Aucun frais d’opération ne doit être généré ici.
+    operationFee=0;
+   }else if(isCompanyMovementType(type)){
+    return json({error:'Les mouvements Approvisionnement et Décaissement sont réservés uniquement au Compte entreprise automatique.'},403);
+   }
+   const isCredit=norm(acc.type).includes('credit');
+   if(actorRole==='agent_caisse'&&(isCompanyAccount||isCredit))return json({error:'L’Agent caisse peut intervenir uniquement sur les comptes clients ordinaires.'},403);
+   if(actorRole==='agent_credit'&&!isCompanyAccount&&!isCredit)return json({error:'L’Agent crédit peut intervenir uniquement sur un compte crédit, ou approvisionner le Compte entreprise automatique.'},403);
+   const allowedCreditTypes=['paiement credit','paiement de credit','frais de penalite de retard','frais de penalites de retard','frais de carnet credit'];
+   if(isCredit && !isCompanyAccount && !allowedCreditTypes.includes(tnorm)){
+    await addSecurityLog(env,bankId,s,'Mouvement refusé','Mouvements','refusé','opération incompatible');
+    return json({error:'opération incompatible'},403);
+   }
+   const isPaymentCredit=(tnorm==='paiement credit'||tnorm==='paiement de credit');
+   const isRecoveryFee=(tnorm==='frais de recouvrement');
+   const isPenalty=(tnorm==='frais de penalite de retard'||tnorm==='frais de penalites de retard');
+   const isCreditCarnetFee=(tnorm==='frais de carnet credit');
+   const isOperationFeeType=(tnorm.startsWith('frais')&&tnorm.includes('operation'));
+   if(isCredit && isPenalty){
+    const rate=Number(acc.credit_penalty_rate||0)||0;
+    amount=Math.round((creditCurrentInstallmentBase(acc)*rate/100)*100)/100;
+   }
+   if(amount<=0)return json({error:'Montant invalide.'},400);
+   const isAnyFee=tnorm.startsWith('frais');
+   const companyDecaissementOnly=isCompanyAccount&&isCompanyDecaissementType(type);
+   // Sur un compte ordinaire, tous les frais autorisés diminuent le solde client.
+   // Sur un compte crédit, pénalité et carnet crédit augmentent la dette ; le paiement la diminue.
+   const debit=(tnorm==='retrait'||tnorm==='decaissement'||isPaymentCredit||(!isCredit&&isAnyFee));
+   const increaseDebt=(isCredit&&(isRecoveryFee||isPenalty||isCreditCarnetFee));
+   let companyAvailable=null;
+   if(isCompanyAccount){
+    companyAvailable=await computeCompanyOfficialBalance(env,bankId,{});
+    if(companyDecaissementOnly){
+     if(companyAvailable<=0)return json({error:'Décaissement impossible : le solde du Compte entreprise automatique est nul ou négatif.'},400);
+     if(amount>companyAvailable)return json({error:'Décaissement impossible : montant supérieur au solde disponible du Compte entreprise automatique.'},400);
+    }
+   }
+   let currentAccountBalance=Number(acc.balance||0);
+   if(isCredit&&!isCompanyAccount){
+    currentAccountBalance=await computeCreditOutstandingBalance(env,bankId,acc);
+    if(isPaymentCredit&&amount>currentAccountBalance)return json({error:'Paiement impossible : montant supérieur au reste à rembourser ('+currentAccountBalance+' FCFA).'},400);
+   }else if(!isCompanyAccount&&debit&&currentAccountBalance<amount){
+    return json({error:'Solde insuffisant.'},400);
+   }
+   let newBal=isCompanyAccount?Math.round((Number(companyAvailable||0)+(companyDecaissementOnly?-amount:amount))*100)/100:Math.round((currentAccountBalance+(debit?-amount:(increaseDebt?amount:amount)))*100)/100;
+   const desc=m.description||(companyDecaissementOnly?'Décaissement du compte entreprise automatique — revenu négatif dans le rapport':(isPenalty?('Pénalité de retard automatique ('+(Number(acc.credit_penalty_rate||0)||0)+'% de l’échéance en cours)'):(isCreditCarnetFee?'Frais de carnet crédit':(isRecoveryFee?'Frais de recouvrement':type))));
+   let finalBal=newBal;
+   const moveId=uid('MOV');
+   const statements=[
+    env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after,created_by,created_by_role) VALUES(?,?,?,?,?,?,?,?,?)').bind(moveId,bankId,acc.id,type,desc,amount,newBal,String(s.userId||''),roleLabel(s.userRole||'Administrateur banque'))
+   ];
+   if(operationFee>0){
+    if(isCredit){
+     finalBal=Number(finalBal)+operationFee;
+    }else{
+     if(Number(finalBal)<operationFee)return json({error:'Solde insuffisant pour les frais d’opération.'},400);
+     finalBal=Number(finalBal)-operationFee;
+    }
+    statements.push(env.DB.prepare('INSERT INTO moves(id,bank_id,account_id,type,description,amount,balance_after,created_by,created_by_role) VALUES(?,?,?,?,?,?,?,?,?)').bind(uid('MOV'),bankId,acc.id,'Frais d’opération','Frais d’opération imputé sur le solde du client',operationFee,finalBal,String(s.userId||''),roleLabel(s.userRole||'Administrateur banque')));
+   }
+   statements.unshift(env.DB.prepare('UPDATE accounts SET balance=? WHERE id=? AND bank_id=?').bind(finalBal,acc.id,bankId));
+   await env.DB.batch(statements);
+   if(isCredit&&isPaymentCredit){
+    await syncCreditRepaymentsToCompanyAccount(env,bankId);
+   }
+   if(isCompanyAccount){
+    await updateCompanyAccountStoredBalance(env,bankId);
+   }
+   await addLog(env,bankId,type+' effectué');
+   await addSecurityLog(env,bankId,s,'Mouvement','Mouvements','autorisé',type);
+   return json({ok:true});
+  }
+
+  if(path==='/api/move/delete'&&request.method==='POST'){await rejectIfExerciseClosed(env,bankId);
+   const m=await body(request);if(!m.id)return json({error:'Opération obligatoire.'},400);const mv=await env.DB.prepare('SELECT * FROM moves WHERE id=? AND bank_id=? AND COALESCE(is_voided,0)=0').bind(m.id,bankId).first();if(!mv)return json({error:'Opération introuvable ou déjà annulée.'},404);const acc=await env.DB.prepare('SELECT * FROM accounts WHERE id=? AND bank_id=?').bind(mv.account_id,bankId).first();
+   if(acc){const t=norm(mv.type);const debit=(t==='retrait'||t==='decaissement'||t.includes('paiement credit')||(t.startsWith('frais')&&!t.includes('penalite')&&!t.includes('recouvrement')));const corrected=Number(acc.balance)+(debit?Number(mv.amount):-Number(mv.amount));await env.DB.prepare('UPDATE accounts SET balance=? WHERE id=? AND bank_id=?').bind(corrected,acc.id,bankId).run();}
+   await env.DB.prepare("UPDATE moves SET is_voided=1,voided_by=?,voided_at=datetime('now'),void_reason=? WHERE id=? AND bank_id=?").bind(String(s.userName||'Administrateur banque'),String(m.reason||'Annulation administrateur sécurisée'),m.id,bankId).run();await updateCompanyAccountStoredBalance(env,bankId);await addSecurityLog(env,bankId,s,'Annulation logique mouvement','Mouvements','autorisé',String(m.reason||''),{permission:'moves.correct',route:path,resource:m.id});await addLog(env,bankId,'Opération annulée logiquement : '+m.id);return json({ok:true,logical_void:true});
+  }
+  if(path==='/api/settings/account-type'&&request.method==='POST'){
+   const t=await body(request); const name=String(t.name||'').trim(); if(!name)return json({error:'Nom obligatoire.'},400);
+   const ex=await env.DB.prepare('SELECT id FROM account_types WHERE bank_id=? AND lower(name)=lower(?)').bind(bankId,name).first();
+   if(ex) await env.DB.prepare('UPDATE account_types SET name=?, is_active=1 WHERE id=? AND bank_id=?').bind(name,ex.id,bankId).run();
+   else await env.DB.prepare('INSERT INTO account_types(id,bank_id,name,is_active) VALUES(?,?,?,1)').bind(uid('ACT'),bankId,name).run();
+   await addLog(env,bankId,'Type de compte ajouté/activé : '+name); return json({ok:true});
+  }
+  if(path==='/api/settings/account-type/delete'&&request.method==='POST'){
+   const t=await body(request); const name=String(t.name||'').trim();
+   let id=t.id||'';
+   if(!id && name){ const ex=await env.DB.prepare('SELECT id FROM account_types WHERE bank_id=? AND lower(name)=lower(?)').bind(bankId,name).first(); id=ex&&ex.id; }
+   if(id) await env.DB.prepare('UPDATE account_types SET is_active=0 WHERE id=? AND bank_id=?').bind(id,bankId).run();
+   else if(name) await env.DB.prepare('INSERT INTO account_types(id,bank_id,name,is_active) VALUES(?,?,?,0)').bind(uid('ACT'),bankId,name).run();
+   else return json({error:'Type de compte obligatoire.'},400);
+   await addLog(env,bankId,'Type de compte désactivé : '+(name||id)); return json({ok:true});
+  }
+  if(path==='/api/settings/movement-type'&&request.method==='POST'){
+   const t=await body(request); const name=String(t.name||'').trim(); if(!name)return json({error:'Nom obligatoire.'},400);
+   const category=String(t.category||'client_operation').trim();
+   const isBankRevenue=(Number(t.isBankRevenue??t.is_bank_revenue)===1||category==='bank_revenue')?1:0;
+   const description=String(t.description||'').trim();
+   const ex=await env.DB.prepare('SELECT id FROM movement_types WHERE bank_id=? AND lower(name)=lower(?)').bind(bankId,name).first();
+   if(ex) await env.DB.prepare('UPDATE movement_types SET name=?, is_active=1, category=?, is_bank_revenue=?, description=? WHERE id=? AND bank_id=?').bind(name,category,isBankRevenue,description,ex.id,bankId).run();
+   else await env.DB.prepare('INSERT INTO movement_types(id,bank_id,name,is_active,category,is_bank_revenue,description) VALUES(?,?,?,1,?,?,?)').bind(uid('MVT'),bankId,name,category,isBankRevenue,description).run();
+   await addLog(env,bankId,'Type de mouvement ajouté/activé : '+name+(isBankRevenue?' — revenu de la banque':' — opération hors revenu banque')); return json({ok:true});
+  }
+  if(path==='/api/settings/movement-type/delete'&&request.method==='POST'){
+   const t=await body(request); const name=String(t.name||'').trim();
+   let id=t.id||'';
+   if(!id && name){ const ex=await env.DB.prepare('SELECT id FROM movement_types WHERE bank_id=? AND lower(name)=lower(?)').bind(bankId,name).first(); id=ex&&ex.id; }
+   if(id) await env.DB.prepare('UPDATE movement_types SET is_active=0 WHERE id=? AND bank_id=?').bind(id,bankId).run();
+   else if(name) await env.DB.prepare('INSERT INTO movement_types(id,bank_id,name,is_active) VALUES(?,?,?,0)').bind(uid('MVT'),bankId,name).run();
+   else return json({error:'Type de mouvement obligatoire.'},400);
+   await addLog(env,bankId,'Type de mouvement désactivé : '+(name||id)); return json({ok:true});
+  }
+  if(path==='/api/revenue'&&request.method==='POST'){
+   const r=await body(request); const name=String(r.name||'').trim(); if(!name)return json({error:'Nature du revenu obligatoire.'},400);
+   await env.DB.prepare('INSERT INTO manual_revenues(id,bank_id,name,operations,amount) VALUES(?,?,?,?,?)').bind(uid('REV'),bankId,name,Number(r.operations||0),Number(r.amount||0)).run();
+   const ex=await env.DB.prepare('SELECT id FROM movement_types WHERE bank_id=? AND lower(name)=lower(?)').bind(bankId,name).first();
+   if(ex) await env.DB.prepare("UPDATE movement_types SET is_active=1, category='bank_revenue', is_bank_revenue=1 WHERE id=? AND bank_id=?").bind(ex.id,bankId).run();
+   else await env.DB.prepare("INSERT INTO movement_types(id,bank_id,name,is_active,category,is_bank_revenue) VALUES(?,?,?,1,'bank_revenue',1)").bind(uid('MVT'),bankId,name).run();
+   await addLog(env,bankId,'Revenu ajouté : '+name); return json({ok:true});
+  }
+  if(path==='/api/revenue/update'&&request.method==='POST'){
+   const r=await body(request); const name=String(r.name||'').trim(); if(!r.id||!name)return json({error:'Revenu invalide.'},400);
+   await env.DB.prepare('UPDATE manual_revenues SET name=?,operations=?,amount=? WHERE id=? AND bank_id=?').bind(name,Number(r.operations||0),Number(r.amount||0),r.id,bankId).run();
+   const ex=await env.DB.prepare('SELECT id FROM movement_types WHERE bank_id=? AND lower(name)=lower(?)').bind(bankId,name).first();
+   if(ex) await env.DB.prepare("UPDATE movement_types SET is_active=1, category='bank_revenue', is_bank_revenue=1 WHERE id=? AND bank_id=?").bind(ex.id,bankId).run();
+   else await env.DB.prepare("INSERT INTO movement_types(id,bank_id,name,is_active,category,is_bank_revenue) VALUES(?,?,?,1,'bank_revenue',1)").bind(uid('MVT'),bankId,name).run();
+   return json({ok:true});
+  }
+  if(path==='/api/revenue/delete'&&request.method==='POST'){
+   const r=await body(request); await env.DB.prepare('DELETE FROM manual_revenues WHERE id=? AND bank_id=?').bind(r.id,bankId).run(); return json({ok:true});
+  }
+  if(path==='/api/revenue/ignore'&&request.method==='POST'){
+   const r=await body(request); const key=String(r.key||'').trim(); if(!key)return json({error:'Ligne invalide.'},400);
+   const ex=await env.DB.prepare('SELECT id FROM ignored_revenues WHERE bank_id=? AND revenue_key=?').bind(bankId,key).first();
+   if(!ex)await env.DB.prepare('INSERT INTO ignored_revenues(id,bank_id,revenue_key) VALUES(?,?,?)').bind(uid('IGN'),bankId,key).run();
+   return json({ok:true});
+  }
+  if(path==='/api/user'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return denyRole(env,bankId,s,'Création utilisateur refusée','Gestion des utilisateurs','Réservé à l’Administrateur banque');
+   const u=await body(request);const login=String(u.login||'').trim(),password=String(u.pass||'');if(!login||!password)return json({error:'Identifiant et mot de passe obligatoires.'},400);const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);
+   if(canonicalRole(u.role||'')==='admin_bank'||canonicalRole(u.role||'')==='super_admin')return json({error:'La création d’un Administrateur banque ou Super Admin n’est pas autorisée depuis Gestion des utilisateurs.'},403);
+   if(loginReserved(env,login)||await loginExists(env,login))return json({error:'Identifiant utilisateur déjà utilisé.'},409);
+   const permissions=JSON.stringify(safePermissionPolicy(u.permissions,u.role||'Agent caisse')),passHash=await hashPassword(password);
+   await env.DB.prepare('INSERT INTO users(id,bank_id,name,login,pass,auth_version,role,status,permissions) VALUES(?,?,?,?,?,1,?,?,?)').bind(uid('USR'),bankId,u.name||'',login,passHash,roleLabel(u.role||'Agent caisse'),String(u.status||'Actif'),permissions).run();
+   await addSecurityLog(env,bankId,s,'Création utilisateur','Gestion des utilisateurs','autorisé','Accès opérationnel agent, pages sensibles bloquées');return json({ok:true});
+  }
+  if(path==='/api/user/update'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return denyRole(env,bankId,s,'Modification utilisateur refusée','Gestion des utilisateurs','Réservé à l’Administrateur banque');
+   const u=await body(request);if(!u.id)return json({error:'Utilisateur obligatoire.'},400);const login=String(u.login||'').trim();if(!login)return json({error:'Identifiant obligatoire.'},400);
+   if(canonicalRole(u.role||'')==='admin_bank'||canonicalRole(u.role||'')==='super_admin')return json({error:'Le rôle Administrateur banque ne peut pas être attribué depuis cette page.'},403);
+   const target=await env.DB.prepare('SELECT * FROM users WHERE id=? AND bank_id=?').bind(u.id,bankId).first();if(!target)return json({error:'Utilisateur introuvable.'},404);if(canonicalRole(target.role||'')==='admin_bank')return json({error:'La modification d’un Administrateur banque est réservée au Super Admin.'},403);
+   if(loginReserved(env,login)||await loginExists(env,login,{userId:u.id}))return json({error:'Identifiant déjà utilisé.'},409);
+   const permissions=JSON.stringify(safePermissionPolicy(u.permissions,u.role||'Agent caisse')),password=String(u.pass||'');let passHash=target.pass,nextVersion=Number(target.auth_version||1);
+   if(password){const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);passHash=await hashPassword(password);nextVersion+=1;}
+   await env.DB.prepare('UPDATE users SET name=?,login=?,pass=?,auth_version=?,role=?,status=?,permissions=? WHERE id=? AND bank_id=?').bind(String(u.name||''),login,passHash,nextVersion,roleLabel(u.role||'Agent caisse'),String(u.status||'Actif'),permissions,u.id,bankId).run();
+   await addSecurityLog(env,bankId,s,'Modification utilisateur','Gestion des utilisateurs','autorisé',password?'Mot de passe modifié et sessions invalidées':'Accès opérationnel agent, pages sensibles bloquées');return json({ok:true});
+  }
+  if(path==='/api/user/toggle'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return denyRole(env,bankId,s,'Blocage utilisateur refusé','Gestion des utilisateurs','Réservé à l’Administrateur banque');
+   const u=await body(request); const row=await env.DB.prepare('SELECT * FROM users WHERE id=? AND bank_id=?').bind(u.id,bankId).first(); if(!row)return json({error:'Utilisateur introuvable.'},404); if(canonicalRole(row.role||'')==='admin_bank')return json({error:'Le blocage/déblocage d’un Administrateur banque est réservé au Super Admin.'},403);
+   const next=String(row.status||'Actif')==='Actif'?'Bloqué':'Actif'; await env.DB.prepare('UPDATE users SET status=?,auth_version=COALESCE(auth_version,1)+1 WHERE id=? AND bank_id=?').bind(next,u.id,bankId).run(); await addSecurityLog(env,bankId,s,next==='Bloqué'?'Blocage utilisateur':'Déblocage utilisateur','Gestion des utilisateurs','autorisé',''); return json({ok:true,status:next});
+  }
+  if(path==='/api/user/delete'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return denyRole(env,bankId,s,'Suppression compte agent refusée','Gestion des utilisateurs','Réservé à l’Administrateur banque');
+   const u=await body(request); const row=await env.DB.prepare('SELECT * FROM users WHERE id=? AND bank_id=?').bind(u.id,bankId).first(); if(!row)return json({error:'Utilisateur introuvable.'},404); if(canonicalRole(row.role||'')==='admin_bank'||canonicalRole(row.role||'')==='super_admin')return json({error:'La suppression de ce compte est interdite depuis cette page.'},403);
+   await env.DB.prepare("UPDATE users SET is_deleted=1,status='Supprimé',auth_version=COALESCE(auth_version,1)+1 WHERE id=? AND bank_id=?").bind(u.id,bankId).run();
+   await addSecurityLog(env,bankId,s,'Suppression compte agent','Gestion des utilisateurs','autorisé',row.name||row.login||''); return json({ok:true});
+  }
+  if(path==='/api/settings/charge-base'&&request.method==='POST'){const c=await body(request); if(!c.name)return json({error:'Libellé obligatoire.'},400); await env.DB.prepare('INSERT INTO charge_bases(id,bank_id,name,category,percent) VALUES(?,?,?,?,?)').bind(uid('CHG'),bankId,c.name,c.category||'Frais',Number(c.percent||0)).run(); await addLog(env,bankId,'Base de calcul des charges ajoutée : '+c.name); return json({ok:true});}
+  if(path==='/api/settings/charge-base/delete'&&request.method==='POST'){const c=await body(request); await env.DB.prepare('DELETE FROM charge_bases WHERE id=? AND bank_id=?').bind(c.id,bankId).run(); await addLog(env,bankId,'Base de calcul des charges supprimée'); return json({ok:true});}
+
+  if(path==='/api/settings/charge-base/update'&&request.method==='POST'){const c=await body(request); if(!c.id)return json({error:'Base introuvable.'},400); if(!c.name)return json({error:'Libellé obligatoire.'},400); await env.DB.prepare('UPDATE charge_bases SET name=?,category=?,percent=? WHERE id=? AND bank_id=?').bind(c.name,c.category||'Frais',Number(c.percent||0),c.id,bankId).run(); await addLog(env,bankId,'Base de calcul des charges modifiée : '+c.name); return json({ok:true});}
+  if(path==='/api/settings/charge-base/reset-defaults'&&request.method==='POST'){await resetDefaultCharges(env,bankId); await addLog(env,bankId,'Liste complète des bases de calcul des charges réinitialisée'); return json({ok:true});}
+  if(path==='/api/settings/obligation'&&request.method==='POST'){await rejectIfExerciseClosed(env,bankId);const o=await body(request); if(!o.name)return json({error:'Libellé obligatoire.'},400); await env.DB.prepare('INSERT INTO obligations(id,bank_id,name,amount,due_day,base_type,base_item) VALUES(?,?,?,?,?,?,?)').bind(uid('OBL'),bankId,o.name,Number(o.amount||0),Number(o.due_day||1),o.base_type||'Bénéfice général',o.base_item||'').run(); await addLog(env,bankId,'Obligation mensuelle ajoutée : '+o.name); return json({ok:true});}
+
+  if(path==='/api/settings/obligation/update'&&request.method==='POST'){await rejectIfExerciseClosed(env,bankId);const o=await body(request); if(!o.id)return json({error:'ID obligation manquant.'},400); if(!o.name)return json({error:'Libellé obligatoire.'},400); await env.DB.prepare('UPDATE obligations SET name=?,amount=?,due_day=?,base_type=?,base_item=? WHERE id=? AND bank_id=?').bind(o.name,Number(o.amount||0),Number(o.due_day||1),o.base_type||'Bénéfice général',o.base_item||'',o.id,bankId).run(); await addLog(env,bankId,'Obligation mensuelle modifiée : '+o.name); return json({ok:true});}
+  if(path==='/api/settings/obligation/delete'&&request.method==='POST'){await rejectIfExerciseClosed(env,bankId);const o=await body(request); await env.DB.prepare('DELETE FROM obligations WHERE id=? AND bank_id=?').bind(o.id,bankId).run(); await addLog(env,bankId,'Obligation mensuelle supprimée'); return json({ok:true});}
+  if(path==='/api/settings/user-reset'&&request.method==='POST'){
+   if(sessionRoleKey(s)!=='admin_bank')return denyRole(env,bankId,s,'Réinitialisation mot de passe refusée','Gestion des utilisateurs','Réservé à l’Administrateur banque');
+   const r=await body(request); const u=await env.DB.prepare('SELECT * FROM users WHERE id=? AND bank_id=?').bind(r.id,bankId).first(); if(!u)return json({error:'Utilisateur introuvable.'},404); if(canonicalRole(u.role||'')==='admin_bank')return json({error:'La réinitialisation du mot de passe Administrateur banque est réservée au Super Admin.'},403);
+   const password=String(r.newpass||'');const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);const passHash=await hashPassword(password);await env.DB.prepare('UPDATE users SET pass=?,auth_version=COALESCE(auth_version,1)+1 WHERE id=? AND bank_id=?').bind(passHash,r.id,bankId).run(); await env.DB.prepare('INSERT INTO reset_requests(id,bank_id,user_id,message,status) VALUES(?,?,?,?,?)').bind(uid('RST'),bankId,r.id,'Mot de passe réinitialisé par Administrateur banque pour '+(u.name||u.login||'utilisateur'),'Traité').run(); await addSecurityLog(env,bankId,s,'Réinitialisation mot de passe utilisateur','Gestion des utilisateurs','autorisé',''); await addLog(env,bankId,'Mot de passe utilisateur réinitialisé'); return json({ok:true});
+  }
+  return json({error:'Route inconnue : '+path},404);
+ }catch(e){if(e instanceof Response)return e; return json({error:e && e.message ? e.message : 'Erreur serveur'},500);}
 }
-// Only the Super Admin may edit an institution or permanently delete an empty one.
-// Refuse destructive deletion if any financial/operational records exist.
-if(u.role==='superadmin'&&p==='/api/admin/institutions/edit'&&method==='POST'){
- const institutionId=String(body.institution_id||'');const name=String(body.name||'').trim();
- const email=String(body.admin_email||'').trim().toLowerCase();const adminName=String(body.admin_name||'').trim();const password=String(body.new_password||'');
- if(!within(institutionId,100)||!within(name,160)||!within(adminName,160)||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>160||(password&&(password.length<12||password.length>256)))return json({error:'INVALID_COMPANY_DETAILS'},400);
- const inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(institutionId).first();if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);
- const admin=await db.prepare("SELECT id FROM users WHERE institution_id=? AND role='admin' ORDER BY created_at ASC LIMIT 1").bind(institutionId).first();if(!admin)return json({error:'COMPANY_ADMIN_NOT_FOUND'},409);
- const conflict=await db.prepare('SELECT id FROM users WHERE email=? AND id<>?').bind(email,admin.id).first();if(conflict)return json({error:'EMAIL_ALREADY_USED'},409);
- const commands=[db.prepare('UPDATE institutions SET name=? WHERE id=?').bind(name,institutionId),db.prepare("UPDATE users SET email=?,display_name=? WHERE id=? AND institution_id=? AND role='admin'").bind(email,adminName,admin.id,institutionId)];
- if(password){const salt=hex(crypto.getRandomValues(new Uint8Array(16))),digest=await pbkdf(password,salt,NEW_PASSWORD_ITERATIONS);commands.push(db.prepare('UPDATE users SET password_hash=?,password_salt=?,password_iterations=?,force_password_change=0,session_version=session_version+1 WHERE id=? AND institution_id=?').bind(digest,salt,NEW_PASSWORD_ITERATIONS,admin.id,institutionId));commands.push(db.prepare('DELETE FROM sessions WHERE user_id=?').bind(admin.id))}
- await db.batch(commands);await audit(db,u,password?'INSTITUTION_ADMIN_CREDENTIALS_UPDATED':'INSTITUTION_UPDATED',institutionId);
- return json({ok:true,password_changed:!!password},200,{'cache-control':'no-store'});
-}
-if(u.role==='superadmin'&&p==='/api/admin/institutions/delete'&&method==='POST'){
- const institutionId=String(body.institution_id||'');
- if(!within(institutionId,100)||body.confirm!== 'SUPPRIMER')return json({error:'DELETION_CONFIRMATION_REQUIRED'},400);
- const inst=await db.prepare('SELECT id,name FROM institutions WHERE id=?').bind(institutionId).first();
- if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);
- const [clients,accounts,transactions,messages]=await db.batch([
-  db.prepare('SELECT COUNT(*) n FROM clients WHERE institution_id=?').bind(institutionId),
-  db.prepare('SELECT COUNT(*) n FROM accounts WHERE institution_id=?').bind(institutionId),
-  db.prepare('SELECT COUNT(*) n FROM transactions WHERE institution_id=?').bind(institutionId),
-  db.prepare('SELECT COUNT(*) n FROM support_messages WHERE institution_id=?').bind(institutionId)
- ]);
- if([clients,accounts,transactions,messages].some(r=>Number(r.results[0].n)>0))return json({error:'INSTITUTION_HAS_DATA',hint:'Désactivez cette entreprise. La suppression définitive est interdite tant que des données bancaires existent.'},409);
- // Do not remove audit history; retain immutable records without sensitive details.
- await db.batch([
-  db.prepare('DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE institution_id=?)').bind(institutionId),
-  db.prepare('DELETE FROM subscriptions WHERE institution_id=?').bind(institutionId),
-  db.prepare('DELETE FROM users WHERE institution_id=?').bind(institutionId),
-  db.prepare('DELETE FROM institutions WHERE id=?').bind(institutionId)
- ]);
- await audit(db,u,'EMPTY_INSTITUTION_DELETED',institutionId);return json({ok:true});
-}
-// Super Admin read-only views and authorized institution status change.
-if(u.role==='superadmin'&&p==='/api/admin/members'&&method==='GET'){const r=await db.prepare('SELECT u.id,u.email,u.display_name,u.role,u.active,i.name institution_name FROM users u LEFT JOIN institutions i ON i.id=u.institution_id ORDER BY u.created_at DESC LIMIT 200').all();return json({items:r.results})}
-if(u.role==='superadmin'&&p==='/api/admin/subscription-list'&&method==='GET'){const r=await db.prepare('SELECT i.name,s.plan_code,s.start_at,s.end_at FROM subscriptions s JOIN institutions i ON i.id=s.institution_id ORDER BY s.rowid DESC LIMIT 100').all();return json({items:r.results})}
-if(u.role==='superadmin'&&p==='/api/admin/journal'&&method==='GET'){const r=await db.prepare('SELECT a.action,a.created_at,u.email user_email FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 100').all();return json({items:r.results})}
-if(u.role==='superadmin'&&p==='/api/admin/institutions/status'&&method==='POST'){if(typeof body.active!=='boolean'||typeof body.institution_id!=='string')return json({error:'INVALID_STATUS'},400);const inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(body.institution_id).first();if(!inst)return json({error:'NOT_FOUND'},404);await db.prepare('UPDATE institutions SET active=? WHERE id=?').bind(body.active?1:0,inst.id).run();await audit(db,u,body.active?'INSTITUTION_ENABLED':'INSTITUTION_DISABLED',inst.id);return json({ok:true})}
-// A bank administrator is created only by the Super Admin. The password is generated
-// with a cryptographic RNG, shown once in the response and never written to audit logs.
-if(p==='/api/admin/bank-admins'&&u.role==='superadmin'&&method==='POST'){
- const email=String(body.email||'').trim().toLowerCase();
- const name=String(body.name||'').trim();
- if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>160||!within(name,160))return json({error:'INVALID_ADMIN_DETAILS'},400);
- const inst=await db.prepare('SELECT id FROM institutions WHERE id=? AND active=1').bind(body.institution_id).first();
- if(!inst)return json({error:'INSTITUTION_NOT_FOUND_OR_INACTIVE'},404);
- const exists=await db.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
- if(exists)return json({error:'EMAIL_ALREADY_USED'},409);
- // Random 24-byte secret: URL-safe characters; no predictable or reusable password.
- const initialPassword=hex(crypto.getRandomValues(new Uint8Array(24)));
- const salt=hex(crypto.getRandomValues(new Uint8Array(16)));
- const digest=await pbkdf(initialPassword,salt,NEW_PASSWORD_ITERATIONS);
- const uid=id();
- try{
-  await db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations,active,force_password_change) VALUES(?,?,?,?,?,?,?,?,1,1)').bind(uid,inst.id,email,name,'admin',digest,salt,NEW_PASSWORD_ITERATIONS).run();
- }catch(e){if(/UNIQUE|constraint/i.test(String(e)))return json({error:'EMAIL_ALREADY_USED'},409);throw e}
- // Non-secret log, without persisting the temporary password.
- try{await audit(db,u,'BANK_ADMIN_CREATED',uid)}catch(err){console.error('BANK_ADMIN_AUDIT_FAILED',err)}
- return json({ok:true,id:uid,email,temporary_password:initialPassword,force_password_change:true},201);
-}
-if(p==='/api/admin/users'&&u.role==='superadmin'&&method==='POST'){
- if(!within(body.email)||!within(body.name)||!within(body.password,256)||body.password.length<12||!['admin','teller','auditor'].includes(body.role))return json({error:'INVALID_USER'},400);
- const inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(body.institution_id).first();if(!inst)return json({error:'INSTITUTION_NOT_FOUND'},404);let salt=hex(crypto.getRandomValues(new Uint8Array(16))),ph=await pbkdf(body.password,salt,NEW_PASSWORD_ITERATIONS);let key=id();await db.prepare('INSERT INTO users(id,institution_id,email,display_name,role,password_hash,password_salt,password_iterations) VALUES(?,?,?,?,?,?,?,?)').bind(key,inst.id,body.email.trim().toLowerCase(),body.name.trim(),body.role,ph,salt,NEW_PASSWORD_ITERATIONS).run();await audit(db,u,'USER_CREATED',key);return json({ok:true,id:key},201)
-}
-if(p==='/api/admin/subscriptions'&&u.role==='superadmin'&&method==='POST'){
- const plan=await db.prepare('SELECT * FROM plans WHERE code=?').bind(body.plan_code).first(),inst=await db.prepare('SELECT id FROM institutions WHERE id=?').bind(body.institution_id).first();if(!plan||!inst)return json({error:'INVALID_SUBSCRIPTION'},400);let end=new Date(Date.now()+plan.duration_days*86400000).toISOString();await db.prepare('INSERT INTO subscriptions(id,institution_id,plan_code,start_at,end_at,created_by) VALUES(?,?,?,?,?,?)').bind(id(),inst.id,plan.code,new Date().toISOString(),end,u.id).run();await audit(db,u,'SUBSCRIPTION_GRANTED',inst.id+':'+plan.code);return json({ok:true,expires_at:end},201)
-}
-return json({error:'NOT_FOUND'},404)}
-export default {async fetch(req,env){const url=new URL(req.url);if(url.pathname.startsWith('/api/')){if(!allowedOrigin(req))return json({error:'BAD_ORIGIN'},403);try{return await route(req,env)}catch(e){console.error('request failure',e);const msg=String(e?.message||e||'');
- if(/no such table/i.test(msg))return json({error:'DATABASE_SCHEMA_MISSING',hint:'Appliquer la migration SQL sur la nouvelle base D1, puis initialiser le Super Admin.'},503);
- if(/no such column|has no column named/i.test(msg))return json({error:'DATABASE_SCHEMA_INCOMPATIBLE',hint:'La base D1 liee ne correspond pas au schema MEGA BANK. Ne pas modifier une base d’un autre projet.'},503);
- return json({error:'SERVER_ERROR',hint:'Consulter les logs Cloudflare Pages/Workers et verifier DB, CACHE, migration et compte admin.'},500)}}let response=await env.ASSETS.fetch(req);let h=new Headers(response.headers);h.set('content-security-policy',csp);h.set('x-frame-options','DENY');h.set('referrer-policy','no-referrer');h.set('x-content-type-options','nosniff');return new Response(response.body,{status:response.status,headers:h})}};
+export default {async fetch(request,env,ctx){
+ const url=new URL(request.url);if(!url.pathname.startsWith('/api/'))return env.ASSETS.fetch(request);
+ const mutation=!['GET','HEAD','OPTIONS'].includes(request.method.toUpperCase());let auditSession=null;let auditRequest=null;
+ if(mutation&&url.pathname!=='/api/security/log'){try{auditRequest=request.clone();if(hasBindings(env)){await ensureSchema(env);auditSession=await getSession(request.clone(),env);}}catch(e){}}
+ const response=await handleApi(request,env,url.pathname);
+ if(auditSession&&auditSession.role==='bank'&&url.pathname!=='/api/logout'&&url.pathname!=='/api/security/log'){
+  try{const permission=await permissionForRequest(url.pathname,auditRequest||request.clone());let resource='';try{const raw=await (auditRequest||request.clone()).clone().json();resource=String(raw.id||raw.accountId||raw.clientId||raw.movement_id||'').slice(0,180);}catch(e){}
+   await addSecurityLog(env,auditSession.bankId,auditSession,request.method+' '+url.pathname,'API',response.ok?'autorisé':'refusé',response.ok?'':('HTTP '+response.status),{permission:permission==='__DENY__'?'':(permission||''),route:url.pathname,resource});
+  }catch(e){}
+ }
+ return response;
+}};

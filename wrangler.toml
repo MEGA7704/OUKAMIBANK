@@ -1,13 +1,23 @@
-name = "mega-bank"
-compatibility_date = "2026-09-01"
-compatibility_flags = ["nodejs_compat"]
-pages_build_output_dir = "./public"
+name = "association-oukami-diabo"
+pages_build_output_dir = "public"
+compatibility_date = "2026-08-01"
+
+# Variable non sensible, chargée automatiquement dans env.SUPER_ADMIN_SESSION_VERSION.
+# Incrémentez cette valeur après chaque changement du mot de passe Super Admin
+# afin d'invalider toutes les sessions précédentes.
+[vars]
+SUPER_ADMIN_SESSION_VERSION = "1"
+
+# Les valeurs SUPER_ADMIN_LOGIN et SUPER_ADMIN_PASSWORD ne doivent jamais être
+# placées ici. Elles sont ajoutées comme secrets chiffrés dans Cloudflare Pages
+# et sont accessibles uniquement côté serveur via env.SUPER_ADMIN_LOGIN et
+# env.SUPER_ADMIN_PASSWORD.
 
 [[d1_databases]]
 binding = "DB"
-database_name = "mega_bank_db"
-database_id = "c837aa59-2d73-4c0f-a349-5a6f40d6988a"
+database_name = "assouka_d1"
+database_id = "5c052733-18c5-4748-b754-ad4e8ce185c2"
 
 [[kv_namespaces]]
-binding = "CACHE"
-id = "ef310bad3c6b4a6e9ea9db6c2edb6f91"
+binding = "KV"
+id = "763b3f6ecc494dae94f7d28c084e067b"

@@ -1,0 +1,72 @@
+/* GLOBAL BANK — thème SAB : vert, argent, blanc. Purement visuel. */
+:root{--deep:#365b06;--deep2:#54850c;--deep3:#253f05;--gold:#86c91b;--gold2:#a8e02b;--ink:#2b343a;--muted:#64716b;--line:#cdd3d4;--green:#4f8f08;--blue:#637884;--bg:#e9edef;--shadow:0 5px 16px rgba(27,39,28,.10)}
+html{scroll-behavior:smooth}
+body{font-family:Arial,Inter,system-ui,sans-serif;background:#e9edef;color:#28322d}
+button,a,input,select,textarea{transition:background-color .15s,border-color .15s,box-shadow .15s}
+:focus-visible{outline:3px solid #86c91b!important;outline-offset:2px}
+/* Portail d'accueil */
+#landing{background:linear-gradient(#e9edef,#f9faf7 38%,#e7ece8);color:#2c3831}
+#landing .v24-nav{background:#f4f6f4!important;border-bottom:1px solid #bac3bb!important;box-shadow:0 2px 6px #20321820!important}
+#landing .v24-brand{color:#315405!important}
+#landing .v24-brand-mark{color:#639f0b!important}
+#landing .v24-hero{background:linear-gradient(135deg,#edf3e8 0%,#fff 58%,#e3eddb 100%)!important}
+#landing .v24-kicker,#landing .v24-hero h1 em{color:#4f8308!important}
+#landing .v24-hero h1,#landing .v24-service-card h3,#landing .v24-section-head h2{color:#2d440d!important}
+#landing .v24-hero p{color:#576158!important}
+#landing .v24-btn-dark,#landing .v24-btn-lg{background:linear-gradient(#8fce23,#4b8405)!important;color:#fff!important;border:1px solid #49790c!important;border-radius:6px!important;box-shadow:0 3px 8px #33530c30!important}
+#landing .v24-service-card{background:#fff!important;border:1px solid #c7ceca!important;border-radius:8px!important;box-shadow:0 3px 9px #33442a14!important}
+#landing .v24-service-card:hover{border-color:#85b63f!important;box-shadow:0 7px 17px #425d2830!important}
+#landing .v24-icon{background:#ecf5e0!important;color:#508108!important;border-radius:7px!important}
+#landing .v24-image-shell,#landing .v24-floating{border-radius:8px!important;border:1px solid #cbd2cb!important}
+/* Connexion : panneau fenêtre blanche, bandeaux vert SAB */
+#auth{background:rgba(34,44,36,.72)!important;backdrop-filter:blur(3px)}
+#auth .auth-shell{background:#d8dedb!important;border:1px solid #9da8a1!important;border-radius:9px!important;padding:7px!important;box-shadow:0 20px 56px #17271855!important}
+#auth .auth-hero{background:linear-gradient(160deg,#496d15,#315407)!important;border-radius:6px!important;border:1px solid #3b5d10!important}
+#auth .auth-main-title{color:#fff!important}
+#auth .auth-pro,#auth .auth-eyebrow{color:#c4ef6a!important}
+#auth .auth-sub,#auth .auth-feature p{color:#f2f7ec!important}
+#auth .auth-feature{background:#ffffff15!important;border:1px solid #c9e5a544!important;border-radius:7px!important}
+#auth .auth-card{background:#fff!important;border-radius:6px!important;border:1px solid #bdc7bf!important;color:#303a31!important;box-shadow:0 2px 8px #2839281c!important}
+#auth .authLogo{background:linear-gradient(#91d31e,#4a8005)!important;color:#fff!important;border-radius:7px!important}
+#auth h1,#auth .auth-panel-header h1{color:#365a0a!important}
+#auth input,#auth select{background:#fff!important;border:1px solid #b9c3b9!important;border-radius:4px!important;color:#2b342c!important;box-shadow:none!important}
+#auth input:focus,#auth select:focus{border-color:#65a711!important;box-shadow:0 0 0 3px #81b82a30!important}
+#auth .auth-primary-button,#auth #loginBtn,#auth #registerBankBtn{background:linear-gradient(#91cd26,#4b8307)!important;color:#fff!important;border:1px solid #4b800b!important;border-radius:5px!important;box-shadow:0 2px 5px #385c1d24!important}
+#auth .tab.active{background:linear-gradient(#82c821,#4e8b06)!important;color:#fff!important;border-radius:5px!important}
+#auth .tabs{border-radius:6px!important;background:#edf0eb!important}
+/* Environnement bancaire : bandeau gris et navigation verte */
+#app{background:#e8ece9!important;color:#29352e!important}
+#app .topbar{background:linear-gradient(180deg,#54790e 0%,#395f05 100%)!important;border-bottom:3px solid #83bf18!important;box-shadow:0 3px 10px #243b1530!important}
+#app .topbar .logo{color:#fff!important}
+#app .topbar .logo span{color:#dbf0aa!important}
+#app .topbar .logo .ico{border-radius:4px!important;background:#ffffff22!important}
+#app .menu{scrollbar-width:thin;scrollbar-color:#abc783 #4e7214}
+#app .menu button,#app .menu a{border-radius:3px!important;color:#f3f7ed!important}
+#app .menu button:hover,#app .menu a:hover{background:#ffffff24!important;color:#fff!important}
+#app .menu button.active{background:#ffffff1c!important;color:#fff!important}
+#app .menu button.active:after{background:#b5e55b!important}
+#app .profile,#app .profile small{color:#f7fbf0!important}
+#app .main{background:#e8ece9!important}
+#app .main h1,#app .main h2,#app .main h3{color:#3a600b}
+#app .main .card,#app .main .panel,#app .main .box,#app .main .stat,#app .main .metric{background:#fff;border:1px solid #c5ccc6!important;border-radius:6px!important;box-shadow:0 2px 7px #1e2d1c12!important}
+#app .main input,#app .main select,#app .main textarea{background:#fff!important;color:#29352e!important;border:1px solid #bac5bc!important;border-radius:4px!important}
+#app .main input:focus,#app .main select:focus,#app .main textarea:focus{border-color:#66a40e!important;box-shadow:0 0 0 3px #80ae2630!important}
+#app .main table{border-collapse:collapse!important;border:1px solid #b9c2ba}
+#app .main th{background:linear-gradient(#f3f4f3,#dce0dd)!important;color:#2e3430!important;font-size:12px;border:1px solid #bbc4be!important;letter-spacing:0!important}
+#app .main td{border-bottom:1px solid #e0e6df}
+#app .main tbody tr:nth-child(even) td{background:#f0f7ed}
+#app .main tr:hover td{background:#e1f0d4!important}
+#app .main button{border-radius:5px!important}
+#app .main button:hover{filter:brightness(.96)}
+#app .main .btn,#app .main button.primary,#app .main button.btn-primary{box-shadow:none}
+#app .managementAnnualTable th{background:linear-gradient(#73a716,#467604)!important;color:#fff!important;border-color:#6c941f!important}
+#app .managementAnnualTable .annualTotal td{background:#e9f4d7!important;border-top:2px solid #75a91f!important}
+#app .managementMonthCard.active{background:#eef7df!important;border:2px solid #75a91f!important}
+#app .gestionYearBoard{border-color:#8cac65!important;border-radius:6px!important}
+#app .gestionLeftCard{border-color:#608f28!important;border-radius:6px!important}
+/* Dialogues : aspect logiciel bancaire de référence, sans agir sur leur comportement */
+#app [role="dialog"],#app .modal-content,#app .modalContent,#app .popup-content,#app .popupContent{background:#fff!important;border:1px solid #9ba89b!important;border-radius:7px!important;box-shadow:0 12px 30px #14221a55!important}
+#app .modal-header,#app .popup-header,#app .modalHeader,#app .popupHeader{background:linear-gradient(#92d526,#4b8807)!important;color:#fff!important;border-radius:5px 5px 0 0!important}
+@media(max-width:900px){#auth .auth-shell{width:min(650px,100%)}#app .topbar{background:#446c0c!important}}
+@media(max-width:600px){#auth .auth-shell{border-radius:6px!important}#auth .auth-card{border-radius:5px!important}#app .main{padding-left:12px!important;padding-right:12px!important}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{transition-duration:.01ms!important;animation-duration:.01ms!important}}
