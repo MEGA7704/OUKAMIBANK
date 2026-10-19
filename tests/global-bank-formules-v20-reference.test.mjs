@@ -1,0 +1,10 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {computeCompanyOfficialBalance,computeCompanyActiveApprovisionnementBalanceTotal,computeCreditRepaidPrincipalTotal,computeTotalRevenueBank} from '../lib/global-bank-formules-v20.mjs';
+test('V20 exemple officiel 630000 FCFA',()=>{
+ const r=computeCompanyOfficialBalance({credits:[{capitalAccorde:350000,paiements:[{capitalRembourse:250000,valide:true}]}],revenus:[{montant:80000,valide:true,classification:'REVENU_BANQUE'}],approvisionnements:[{montant:750000,valide:true,creditAffectations:[{capitalAccorde:350000,valide:true}]}],decaissements:[{montant:100000,valide:true}]});assert.equal(r.solde,630000);assert.equal(r.approvisionnementsActifs,400000);
+});
+test('capital remboursé plafonné et remboursements annulés exclus',()=>assert.equal(computeCreditRepaidPrincipalTotal([{capitalAccorde:100,paiements:[{capitalRembourse:200,valide:true},{capitalRembourse:40,valide:true,annule:true}]}]),100));
+test('seuls revenus reconnus non annulés',()=>assert.equal(computeTotalRevenueBank([{montant:50,valide:true,classification:'REVENU_BANQUE'},{montant:90,valide:true,classification:'DEPOT_CLIENT'},{montant:30,valide:true,annule:true,classification:'REVENU_BANQUE'}]),50));
+test('approvisionnement ne compte pas deux fois les fonds prêtés',()=>assert.equal(computeCompanyActiveApprovisionnementBalanceTotal([{montant:500,valide:true,creditAffectations:[{capitalAccorde:350,valide:true}]}]),150));
+test('refuse financement dépassant la source',()=>assert.throws(()=>computeCompanyActiveApprovisionnementBalanceTotal([{montant:100,valide:true,creditAffectations:[{capitalAccorde:101,valide:true}]}]),/APPROVISIONNEMENT_SURUTILISE/));
+test('refuse valeurs fractionnaires, négatives et débordements',()=>{assert.throws(()=>computeTotalRevenueBank([{montant:1.5,valide:true,classification:'REVENU_BANQUE'}]));assert.throws(()=>computeCompanyOfficialBalance({credits:[],revenus:[],approvisionnements:[],decaissements:[{montant:-1,valide:true}]}))});
