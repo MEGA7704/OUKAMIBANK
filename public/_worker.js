@@ -783,8 +783,15 @@ async function handleApi(request,env,path){
   if(request.method==='OPTIONS')return new Response(null,{status:204});
   assertSameOrigin(request);
   if(!hasBindings(env))return json({ok:false,error:'Bindings manquants : créez et liez une base D1 avec le nom DB, puis un KV avec le nom KV dans Cloudflare Pages > Settings > Functions > Bindings.'},500);
-  await ensureSchema(env);
-  await ensureOukamiInstitution(env);
+  // Connexion rapide : ne jamais lancer toutes les migrations D1 sur un clic de connexion.
+  // Une base neuve reste initialisée automatiquement en cas d'absence de tables.
+  const authRoute = (path==='/api/login' || path==='/api/oukami/client-login' || path==='/api/oukami/client-me' || path==='/api/logout');
+  if(authRoute){
+    try{await env.DB.prepare('SELECT id FROM banks LIMIT 1').first();}
+    catch(e){if(/no such table/i.test(String(e?.message||'')))await ensureSchema(env);else throw e;}
+  }else await ensureSchema(env);
+  // Créer le compte initial seulement à la connexion administrateur ou au statut.
+  if(path==='/api/login' || path==='/api/status')await ensureOukamiInstitution(env);
   if(path==='/api/status')return json({ok:true,cloudflare:true,d1:true,kv:true,message:'API connectée. D1 + KV actifs.'});
   if(path==='/api/register'&&request.method==='POST')return json({error:'Inscription publique désactivée.'},403);
   if(false && path==='/api/register'&&request.method==='POST'){
@@ -1435,7 +1442,7 @@ async function handleApi(request,env,path){
 export default {async fetch(request,env,ctx){
  const url=new URL(request.url);if(!url.pathname.startsWith('/api/'))return env.ASSETS.fetch(request);
  const mutation=!['GET','HEAD','OPTIONS'].includes(request.method.toUpperCase());let auditSession=null;let auditRequest=null;
- if(mutation&&url.pathname!=='/api/security/log'){try{auditRequest=request.clone();if(hasBindings(env)){await ensureSchema(env);auditSession=await getSession(request.clone(),env);}}catch(e){}}
+ if(mutation&&!['/api/security/log','/api/login','/api/oukami/client-login','/api/logout'].includes(url.pathname)){try{auditRequest=request.clone();if(hasBindings(env)){auditSession=await getSession(request.clone(),env);}}catch(e){}}
  const response=await handleApi(request,env,url.pathname);
  if(auditSession&&auditSession.role==='bank'&&url.pathname!=='/api/logout'&&url.pathname!=='/api/security/log'){
   try{const permission=await permissionForRequest(url.pathname,auditRequest||request.clone());let resource='';try{const raw=await (auditRequest||request.clone()).clone().json();resource=String(raw.id||raw.accountId||raw.clientId||raw.movement_id||'').slice(0,180);}catch(e){}
