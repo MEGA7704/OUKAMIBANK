@@ -891,7 +891,7 @@ async function handleApi(request,env,path){
    const weak=assertPasswordStrength(password);if(weak)return json({error:weak},400);
    const found=await env.DB.prepare('SELECT id FROM clients WHERE id=? AND bank_id=? AND is_deleted=0').bind(clientId,s.bankId).first();if(!found)return json({error:'Client introuvable.'},404);
    await env.DB.prepare('UPDATE clients SET pass=? WHERE id=? AND bank_id=?').bind(await hashPassword(password),clientId,s.bankId).run();
-   await addSecurityLog(env,s.bankId,s,'Activation accès client','Clients','autorisé','');return json({ok:true});
+   await addSecurityLog(env,s.bankId,s,'Définition ou réinitialisation du code client','Clients','autorisé','');return json({ok:true});
   }
   if(path==='/api/save'&&request.method==='POST'){
    if(s.role!=='bank'||sessionRoleKey(s)!=='admin_bank')return json({error:'Enregistrement global réservé à l’Administrateur banque.'},403);
