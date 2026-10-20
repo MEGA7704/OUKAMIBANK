@@ -2296,42 +2296,66 @@ async function registerBank(){
   finally{if(btn){btn.disabled=false;if(btn.dataset.oldText)btn.textContent=btn.dataset.oldText;}}
 }
 async function login(ev){
-  if(ev&&ev.preventDefault)ev.preventDefault();
-  if(ev&&ev.stopPropagation)ev.stopPropagation();
+  if(ev?.preventDefault)ev.preventDefault();
+  if(ev?.stopPropagation)ev.stopPropagation();
   const btn=document.getElementById('loginBtn');
   clearLoginError();
+  const visibleStatus=(msg,isError=false)=>{
+    let el=document.getElementById('oukamiConnectionStatus');
+    if(!el){el=document.createElement('div');el.id='oukamiConnectionStatus';el.setAttribute('role','status');el.style.cssText='display:block!important;position:relative!important;visibility:visible!important;padding:12px 14px;margin:10px 0;background:#fffbe7;color:#29420d;border:2px solid #779b25;border-radius:9px;font:600 14px Arial,sans-serif;white-space:normal';btn?.parentElement?.appendChild(el);}
+    el.style.background=isError?'#fff0f0':'#fffbe7';el.style.borderColor=isError?'#ad2424':'#779b25';el.style.color=isError?'#8f1717':'#29420d';el.textContent=msg;
+    return el;
+  };
   try{
-    const idEl=document.getElementById('loginId'), passEl=document.getElementById('loginPass');
-    const loginValue=(idEl&&idEl.value?String(idEl.value).trim():'');
-    const passValue=(passEl&&passEl.value?String(passEl.value):'');
-    if(!loginValue){showLoginError('Adresse e-mail ou identifiant obligatoire.');return false;}
-    if(!passValue){showLoginError('Mot de passe obligatoire.');return false;}
-    if(btn){btn.disabled=true;btn.dataset.oldText=btn.textContent;btn.textContent='Connexion...';}
+    const loginValue=(document.getElementById('loginId')?.value||'').trim();
+    const passValue=document.getElementById('loginPass')?.value||'';
+    if(!loginValue||!passValue){visibleStatus('Renseignez votre identifiant et votre mot de passe.',true);return false;}
+    if(btn){btn.disabled=true;btn.textContent='Vérification de la connexion…';}
+    visibleStatus('Vérification de vos identifiants auprès du serveur…');
     const selected=window.oukamiLoginRole||'admin';
-    if(btn)btn.textContent='Vérification des identifiants…';
     const r=await api(selected==='client'?'/oukami/client-login':'/login',{login:loginValue,pass:passValue});
-    if(btn)btn.textContent='Ouverture de votre espace…';
-    if(selected==='client'){await loadOukamiClient();return false;}
-    if(selected==='agent'&&r.role==='super'){await api('/logout',{});throw new Error('Identifiant agent requis.');} 
-    if(selected==='agent'&&r.role==='bank'&&!r.user?.id){await api('/logout',{});throw new Error('Identifiant agent requis.');}
-    const rememberEl=document.getElementById('rememberMe');
-    try{if(rememberEl&&rememberEl.checked)localStorage.setItem('gb_remember_login',loginValue);else localStorage.removeItem('gb_remember_login');}catch(_){}
-    token='';
-    role=r.role||'';
-    await load();
-    openApp();
+    if(selected==='client'){
+      visibleStatus('Connexion réussie. Chargement de votre compte…');
+      await loadOukamiClient();
+      return false;
+    }
+    if(selected==='agent'&&(r.role==='super'||(r.role==='bank'&&!r.user?.id))){
+      await api('/logout',{});throw new Error('Veuillez utiliser un compte Agent.');
+    }
+    role=r.role||'bank';token='';
+    try{const remember=document.getElementById('rememberMe');if(remember?.checked)localStorage.setItem('gb_remember_login',loginValue);else localStorage.removeItem('gb_remember_login');}catch(_){}
+    // Ouvrir immédiatement la structure du menu, sans bloquer l'interface sur /api/me.
+    data={role,bank:{id:r.bankId||'',name:'ASSOCIATION OUKAMI DE DIABO',manager:r.user?.name||''},user:r.user||{name:'Administrateur',role:'Administrateur banque'},clients:[],accounts:[],moves:[],users:[],banks:[]};
+    const auth=document.getElementById('auth'),landing=document.getElementById('landing'),app=document.getElementById('app');
+    if(auth)auth.style.display='none';if(landing)landing.style.display='none';if(app)app.style.display='block';
+    const main=document.getElementById('main');
+    if(main)main.innerHTML='<section class="panel" style="padding:26px"><h2>Connexion réussie</h2><p>Chargement de votre espace bancaire…</p><p id="oukamiLoadProgress">Récupération des données sécurisées.</p></section>';
+    try{applyRoleShell();renderMenu();}catch(err){console.warn('Initialisation du menu :',err);}
+    try{
+      await load();
+      openApp();
+    }catch(error){
+      console.error('Chargement des données bancaires :',error);
+      const msg=String(error?.message||'Erreur inconnue');
+      if(main)main.innerHTML='<section class="panel" style="padding:26px"><h2>Connexion réussie — données indisponibles</h2><p id="oukamiLoadProblem"></p><button class="btn" type="button" onclick="retryOukamiBankLoad()">Réessayer le chargement</button><button class="btn" type="button" onclick="logout()">Déconnexion</button></section>';
+      const note=document.getElementById('oukamiLoadProblem');if(note)note.textContent=msg;
+    }
     return false;
-  }catch(e){
-    console.error('Erreur login:',e);
-    const msg=(e&&e.message)||'';
-    const low=msg.toLowerCase();
-    const clean=(low.includes('identifiant')||low.includes('mot de passe'))?'Identifiant ou mot de passe incorrect.':(msg||'Connexion impossible');
-    showLoginError(clean);
-    toast(clean);
+  }catch(error){
+    console.error('Échec de connexion :',error);
+    const msg=error?.message||'Connexion impossible. Consultez les journaux Cloudflare.';
+    visibleStatus('Connexion impossible : '+msg,true);
+    showLoginError(msg);
     return false;
-  }finally{
-    if(btn){btn.disabled=false;if(btn.dataset.oldText)btn.textContent=btn.dataset.oldText;}
-  }
+  }finally{if(btn){btn.disabled=false;btn.innerHTML='<span>SE CONNECTER</span>';}}
+}
+async function retryOukamiBankLoad(){
+ const main=document.getElementById('main');
+ if(main)main.innerHTML='<section class="panel" style="padding:26px"><h2>Nouvelle tentative…</h2><p>Chargement sécurisé de vos données.</p></section>';
+ try{await load();openApp();}catch(error){
+  if(main)main.innerHTML='<section class="panel" style="padding:26px"><h2>Chargement impossible</h2><p id="oukamiRetryError"></p><button class="btn" onclick="retryOukamiBankLoad()">Réessayer</button><button class="btn" onclick="logout()">Déconnexion</button></section>';
+  const el=document.getElementById('oukamiRetryError');if(el)el.textContent=error?.message||'Erreur serveur';
+ }
 }
 async function load(){data=await api('/me');role=data.role}async function refresh(){await load();render()}
 function applyRoleShell(){
