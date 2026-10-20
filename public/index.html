@@ -1805,9 +1805,21 @@ button,a,.btn,.mini,.menu button{touch-action:manipulation;-webkit-tap-highlight
 @media(max-width:650px){.bankProfileOverviewV41 .bankProfileOverviewTop{padding:18px!important;align-items:flex-start!important}.bankProfileOverviewV41 .bankPreviewLogoLarge{width:78px!important;height:78px!important;min-width:78px!important}.bankProfileInfoGrid{grid-template-columns:1fr!important;padding:12px!important}.bankProfileInfoCard{min-height:82px!important}}
 </style>
 <link rel="stylesheet" href="/assets/global-bank-design-2026.css?v=sab2">
+<style id="oukami-screen-visibility-v4">
+/* One visible screen at a time. This rule deliberately overrides legacy !important display rules. */
+#auth.auth.auth-modal[style*="display: none"],
+#auth.auth.auth-modal[style*="display:none"],
+#app[style*="display: none"], #app[style*="display:none"],
+#landing[style*="display: none"], #landing[style*="display:none"],
+#oukamiClientPortal[hidden] {display:none!important;}
+/* Never display the bank menu below the authentication form. */
+#auth.auth.auth-modal[style*="display: grid"],
+#auth.auth.auth-modal[style*="display:grid"] {display:grid!important;}
+#oukamiClientPortal:not([hidden]) {display:block;}
+</style>
 <style id="oukami-focused-ui">
 #landing,#globalHomeBtn,.global-home-fab,#registerBox,.auth-secondary-actions,.auth-legal,.whatsapp-float,.auth-popup-close,.auth-features,.auth-ambient,.auth-eyebrow{display:none!important}
-#auth.auth.auth-modal{position:relative!important;display:grid!important;inset:auto!important;min-height:100dvh!important;max-height:none!important;overflow:auto!important;padding:24px!important;background:linear-gradient(145deg,#244b0f,#517e14 65%,#253e17)!important;place-items:center!important}
+#auth.auth.auth-modal{position:relative!important;inset:auto!important;min-height:100dvh!important;max-height:none!important;overflow:auto!important;padding:24px!important;background:linear-gradient(145deg,#244b0f,#517e14 65%,#253e17)!important;place-items:center!important}
 #auth .auth-shell{max-width:890px!important;width:100%!important;grid-template-columns:.85fr 1fr!important;padding:10px!important;min-height:0!important;max-height:none!important;overflow:visible!important;background:#f2f4ee!important;border:1px solid #d1d9ca!important;border-radius:22px!important;box-shadow:0 28px 80px #12220955!important}
 #auth .auth-hero{background:linear-gradient(150deg,#315a13,#75aa19)!important;min-height:460px!important;border-radius:16px!important;padding:32px 24px!important;justify-content:center!important}
 #auth .auth-card{min-height:460px!important;border-radius:16px!important;padding:30px!important;border:1px solid #e3e8dc!important;box-shadow:none!important}
@@ -2327,7 +2339,7 @@ async function login(ev){
     // Ouvrir immédiatement la structure du menu, sans bloquer l'interface sur /api/me.
     data={role,bank:{id:r.bankId||'',name:'ASSOCIATION OUKAMI DE DIABO',manager:r.user?.name||''},user:r.user||{name:'Administrateur',role:'Administrateur banque'},clients:[],accounts:[],moves:[],users:[],banks:[]};
     const auth=document.getElementById('auth'),landing=document.getElementById('landing'),app=document.getElementById('app');
-    if(auth)auth.style.display='none';if(landing)landing.style.display='none';if(app)app.style.display='block';
+    if(auth)auth.style.setProperty('display','none','important');if(landing)landing.style.display='none';if(app)app.style.display='block';
     const main=document.getElementById('main');
     if(main)main.innerHTML='<section class="panel" style="padding:26px"><h2>Connexion réussie</h2><p>Chargement de votre espace bancaire…</p><p id="oukamiLoadProgress">Récupération des données sécurisées.</p></section>';
     try{applyRoleShell();renderMenu();}catch(err){console.warn('Initialisation du menu :',err);}
@@ -2374,7 +2386,7 @@ function applyRoleShell(){
   if(profileIcon)profileIcon.textContent='🔎';
  }
 }
-function openApp(){const landing=$('landing'),auth=$('auth'),app=$('app'),h=$('globalHomeBtn');if(landing)landing.style.display='none';if(auth)auth.style.display='none';if(app)app.style.display='block';if(h)h.style.display='inline-flex';restorePageScroll();const routed=pageFromUrl();active=(routed&&hasPageAccess(routed))?routed:(allowedPagesForRole()[0]||'dashboard');if(!routed)syncPageUrl(active,true);applyRoleShell();renderMenu();renderLandingConnectedMenu();render();setupFreeVersionReminder();requestAnimationFrame(()=>window.scrollTo(0,0));}
+function openApp(){const progress=$('oukamiConnectionStatus');if(progress)progress.remove();const landing=$('landing'),auth=$('auth'),app=$('app'),h=$('globalHomeBtn');if(landing)landing.style.display='none';if(auth)auth.style.display='none';if(app)app.style.display='block';if(h)h.style.display='inline-flex';restorePageScroll();const routed=pageFromUrl();active=(routed&&hasPageAccess(routed))?routed:(allowedPagesForRole()[0]||'dashboard');if(!routed)syncPageUrl(active,true);applyRoleShell();renderMenu();renderLandingConnectedMenu();render();setupFreeVersionReminder();requestAnimationFrame(()=>window.scrollTo(0,0));}
 async function logout(){try{await api('/logout',{})}catch{}if(__freeVersionReminderTimer)clearInterval(__freeVersionReminderTimer);__freeVersionReminderTimer=null;token='';data=null;role=null;mailboxState={items:[],loaded:false,loading:false,error:'',filter:'all',search:''};renderLandingConnectedMenu();showLanding()}function bank(){return data.bank||{}}
 function bankDisplayName(){let b=bank();let n=String((b&&b.name)||'').trim();return n||'Banque'}
 
@@ -6394,7 +6406,7 @@ window.oukamiLoginRole='admin';
 function chooseOukamiRole(r){window.oukamiLoginRole=r;document.querySelectorAll('[data-ou-role]').forEach(b=>b.classList.toggle('selected',b.dataset.ouRole===r));const el=document.getElementById('loginId');if(el)el.placeholder=r==='client'?'N° compte, identifiant ou téléphone':'Identifiant ou e-mail';}
 function closeAuthPopup(){return false;}
 function handleAuthBackdrop(){return false;}
-function showOukamiLogin(){const a=$('auth'),ap=$('app'),l=$('landing'),cp=$('oukamiClientPortal');if(l)l.style.display='none';if(ap)ap.style.display='none';if(cp)cp.hidden=true;if(a)a.style.display='grid';document.body.classList.remove('auth-popup-open');}
+function showOukamiLogin(){const status=$('oukamiConnectionStatus');if(status)status.remove();const a=$('auth'),ap=$('app'),l=$('landing'),cp=$('oukamiClientPortal');if(l)l.style.display='none';if(ap)ap.style.display='none';if(cp)cp.hidden=true;if(a)a.style.display='grid';document.body.classList.remove('auth-popup-open');}
 function showLanding(){showOukamiLogin();return false;}
 function showAuth(){showOukamiLogin();}
 function openAuthRegister(){showOukamiLogin();return false;}
