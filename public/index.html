@@ -2244,7 +2244,20 @@ function openWhatsappContact(){
   window.open('https://wa.me/'+raw+'?text='+message,'_blank','noopener,noreferrer');
   return false;
 }
-async function api(path, payload=null, method=null){const opt={method:method||(payload?'POST':'GET'),headers:{},credentials:'same-origin'};if(payload){opt.headers['content-type']='application/json';opt.body=JSON.stringify(payload)}const r=await fetch('/api'+path,opt);const txt=await r.text();let j={};try{j=txt?JSON.parse(txt):{}}catch{throw new Error('Réponse serveur invalide')}if(!r.ok)throw new Error(j.error||'Erreur API');return j}
+async function api(path, payload=null, method=null){
+ const controller=new AbortController(),timeoutMs=path==='/me'?30000:20000;
+ const timer=setTimeout(()=>controller.abort(),timeoutMs);
+ try{
+  const opt={method:method||(payload?'POST':'GET'),headers:{},credentials:'same-origin',signal:controller.signal};
+  if(payload){opt.headers['content-type']='application/json';opt.body=JSON.stringify(payload)}
+  const r=await fetch('/api'+path,opt);
+  const txt=await r.text();let j={};
+  try{j=txt?JSON.parse(txt):{}}catch{throw new Error('Réponse serveur invalide pour '+path+' (HTTP '+r.status+').')}
+  if(!r.ok)throw new Error(j.error||'Erreur serveur HTTP '+r.status+' sur '+path);
+  return j;
+ }catch(e){if(e&&e.name==='AbortError')throw new Error('Délai dépassé sur '+path+' ('+Math.round(timeoutMs/1000)+' s). Vérifiez les journaux Cloudflare Functions.');throw e;}
+ finally{clearTimeout(timer)}
+}
 async function checkStatus(){
  const box=$('apiStatus');
  try{
@@ -2295,7 +2308,9 @@ async function login(ev){
     if(!passValue){showLoginError('Mot de passe obligatoire.');return false;}
     if(btn){btn.disabled=true;btn.dataset.oldText=btn.textContent;btn.textContent='Connexion...';}
     const selected=window.oukamiLoginRole||'admin';
+    if(btn)btn.textContent='Vérification des identifiants…';
     const r=await api(selected==='client'?'/oukami/client-login':'/login',{login:loginValue,pass:passValue});
+    if(btn)btn.textContent='Ouverture de votre espace…';
     if(selected==='client'){await loadOukamiClient();return false;}
     if(selected==='agent'&&r.role==='super'){await api('/logout',{});throw new Error('Identifiant agent requis.');} 
     if(selected==='agent'&&r.role==='bank'&&!r.user?.id){await api('/logout',{});throw new Error('Identifiant agent requis.');}
